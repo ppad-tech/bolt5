@@ -25,9 +25,15 @@ library
       -Wall
   exposed-modules:
       Lightning.Protocol.BOLT5
+      Lightning.Protocol.BOLT5.Detect
+      Lightning.Protocol.BOLT5.Spend
+      Lightning.Protocol.BOLT5.Types
   build-depends:
       base >= 4.9 && < 5
     , bytestring >= 0.9 && < 0.13
+    , ppad-bolt3 >= 0.0.1 && < 0.1
+    , ppad-sha256 >= 0.3.2 && < 0.4
+    , ppad-tx >= 0.1 && < 0.2
 
 test-suite bolt5-tests
   type:                exitcode-stdio-1.0
@@ -41,9 +47,13 @@ test-suite bolt5-tests
   build-depends:
       base
     , bytestring
+    , ppad-bolt3
     , ppad-bolt5
+    , ppad-tx
     , tasty
     , tasty-hunit
+    , tasty-quickcheck
+    , QuickCheck
 
 benchmark bolt5-bench
   type:                exitcode-stdio-1.0
@@ -59,7 +69,9 @@ benchmark bolt5-bench
     , bytestring
     , criterion
     , deepseq
+    , ppad-bolt3
     , ppad-bolt5
+    , ppad-tx
 
 benchmark bolt5-weigh
   type:                exitcode-stdio-1.0
@@ -74,5 +86,7 @@ benchmark bolt5-weigh
       base
     , bytestring
     , deepseq
+    , ppad-bolt3
     , ppad-bolt5
+    , ppad-tx
     , weigh
