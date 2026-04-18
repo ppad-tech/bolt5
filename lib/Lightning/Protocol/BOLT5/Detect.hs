@@ -27,7 +27,7 @@ module Lightning.Protocol.BOLT5.Detect (
   , htlc_timed_out
   ) where
 
-import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Bitcoin.Prim.Tx as BT
 import Data.Word (Word32)
 import qualified Data.ByteString as BS
 import Lightning.Protocol.BOLT3
@@ -76,21 +76,20 @@ identify_close
   !remoteCommitTx
   !onChainBytes =
     -- Compare the on-chain tx bytes against known tx
-    -- serializations. The caller serializes commitment txs via
-    -- bolt3's encode_tx (which produces unsigned segwit format).
-    -- We compare the stripped (unsigned) serializations.
+    -- serializations. We compare stripped (unsigned, legacy)
+    -- serializations.
     let !localBytes = encode_tx_for_signing localCommitTx
         !remoteBytes = encode_tx_for_signing remoteCommitTx
-    in if onChainBytes == localBytes
-       then Just LocalCommitClose
-       else if onChainBytes == remoteBytes
-       then Just RemoteCommitClose
-       -- For mutual close and revoked detection, the caller
-       -- should perform additional checks (e.g. comparing
-       -- closing tx format, checking secret store for older
-       -- commitment numbers). This function provides the
-       -- basic identification.
-       else Nothing
+    in  if localBytes == Just onChainBytes
+        then Just LocalCommitClose
+        else if remoteBytes == Just onChainBytes
+        then Just RemoteCommitClose
+        -- For mutual close and revoked detection, the caller
+        -- should perform additional checks (e.g. comparing
+        -- closing tx format, checking secret store for older
+        -- commitment numbers). This function provides the
+        -- basic identification.
+        else Nothing
 
 -- output classification ----------------------------------------------
 
@@ -115,13 +114,15 @@ classify_local_commit_outputs
   -> [UnresolvedOutput]
 classify_local_commit_outputs !commitTx !keys !delay
     !features !htlcs =
-  let !txid = commitment_txid commitTx
-      !outputs = ctx_outputs commitTx
-      !revpk = ck_revocation_pubkey keys
-      !delayedpk = ck_local_delayed keys
-  in zipWith (classifyLocalOutput txid revpk delayedpk
-               delay features keys htlcs)
-       [0..] outputs
+  case commitment_txid commitTx of
+    Nothing -> []
+    Just !txid ->
+      let !outputs = ctx_outputs commitTx
+          !revpk = ck_revocation_pubkey keys
+          !delayedpk = ck_local_delayed keys
+      in  zipWith (classifyLocalOutput txid revpk delayedpk
+                     delay features keys htlcs)
+            [0..] outputs
 
 -- | Classify a single output from a local commitment tx.
 classifyLocalOutput
@@ -181,10 +182,13 @@ classify_remote_commit_outputs
   -> [UnresolvedOutput]
 classify_remote_commit_outputs !commitTx !keys
     !features !htlcs =
-  let !txid = commitment_txid commitTx
-      !outputs = ctx_outputs commitTx
-  in zipWith (classifyRemoteOutput txid features keys htlcs)
-       [0..] outputs
+  case commitment_txid commitTx of
+    Nothing -> []
+    Just !txid ->
+      let !outputs = ctx_outputs commitTx
+      in  zipWith
+            (classifyRemoteOutput txid features keys htlcs)
+            [0..] outputs
 
 -- | Classify a single output from a remote commitment tx.
 classifyRemoteOutput
@@ -246,10 +250,12 @@ classify_revoked_commit_outputs
   -> [UnresolvedOutput]
 classify_revoked_commit_outputs !commitTx !_keys
     !revpk !_features !_htlcs =
-  let !txid = commitment_txid commitTx
-      !outputs = ctx_outputs commitTx
-  in zipWith (classifyRevokedOutput txid revpk)
-       [0..] outputs
+  case commitment_txid commitTx of
+    Nothing -> []
+    Just !txid ->
+      let !outputs = ctx_outputs commitTx
+      in  zipWith (classifyRevokedOutput txid revpk)
+            [0..] outputs
 
 -- | Classify a single output from a revoked commitment tx.
 classifyRevokedOutput
@@ -329,14 +335,10 @@ htlc_timed_out !currentHeight !htlc =
 -- internal helpers ---------------------------------------------------
 
 -- | Compute the txid of a commitment transaction.
-commitment_txid :: CommitmentTx -> TxId
-commitment_txid !tx =
-  let !bytes = encode_tx_for_signing tx
-      !hash1 = SHA256.hash bytes
-      !hash2 = SHA256.hash hash1
-  in case mkTxId hash2 of
-       Just tid -> tid
-       Nothing  -> error "commitment_txid: impossible"
+--
+-- Returns 'Nothing' if the commitment has no outputs.
+commitment_txid :: CommitmentTx -> Maybe TxId
+commitment_txid !tx = fmap BT.txid (commitment_to_tx tx)
 
 -- | Find an HTLC matching a given script in the output list.
 findHTLC
