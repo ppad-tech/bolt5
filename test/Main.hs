@@ -3,7 +3,7 @@
 
 module Main where
 
-import Bitcoin.Prim.Tx (Tx(..), TxIn(..), TxOut(..))
+import Bitcoin.Prim.Tx (TxOut(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
@@ -297,7 +297,7 @@ spend_tests = testGroup "Spend" [
           uo2 = B5.UnresolvedOutput op2 (Satoshi 30000)
             (B5.Revoke dummyRevocationPubkey)
           pctx = B5.PenaltyContext
-            { B5.pc_outputs = [uo1, uo2]
+            { B5.pc_outputs = uo1 :| [uo2]
             , B5.pc_revocation_key =
                 dummyRevocationPubkey
             , B5.pc_destination = dummyDestScript

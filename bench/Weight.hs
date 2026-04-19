@@ -8,6 +8,7 @@ module Main where
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import Control.DeepSeq (NFData(..))
 import qualified Data.ByteString as BS
+import qualified Data.List.NonEmpty as NE
 import Lightning.Protocol.BOLT3 hiding
   (txout_value, txout_script)
 import qualified Lightning.Protocol.BOLT5 as B5
@@ -101,14 +102,13 @@ dummyFeerate = FeeratePerKw 253
 dummyDelay :: ToSelfDelay
 dummyDelay = ToSelfDelay 144
 
-mkRevokedOutputs :: Int -> [B5.UnresolvedOutput]
+mkRevokedOutputs :: Int -> NE.NonEmpty B5.UnresolvedOutput
 mkRevokedOutputs n =
-  [ B5.UnresolvedOutput
-      (OutPoint dummyTxId (fromIntegral i))
-      (Satoshi 10000)
-      (B5.Revoke dummyRevPk)
-  | i <- [0..n-1]
-  ]
+  let uo i = B5.UnresolvedOutput
+        (OutPoint dummyTxId (fromIntegral i))
+        (Satoshi 10000)
+        (B5.Revoke dummyRevPk)
+  in  uo 0 NE.:| [ uo i | i <- [1..n-1] ]
 
 -- weights ------------------------------------------------------------
 
