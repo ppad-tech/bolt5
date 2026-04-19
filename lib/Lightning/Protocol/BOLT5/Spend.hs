@@ -55,6 +55,8 @@ import Lightning.Protocol.BOLT5.Types
 -- broadcasting. The caller signs with the local delayed privkey
 -- and uses 'to_local_witness_spend' from bolt3.
 --
+-- Returns 'Nothing' if the fee would exceed the output value.
+--
 -- The input nSequence is set to the to_self_delay value.
 spend_to_local
   :: OutPoint
@@ -67,7 +69,7 @@ spend_to_local
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_to_local !op !value !revpk !delay !delayedpk
     !destScript !feerate =
   let !witnessScript =
@@ -75,12 +77,16 @@ spend_to_local !op !value !revpk !delay !delayedpk
       !weight = to_local_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-      !outputValue =
-        Satoshi (unSatoshi value - unSatoshi fee)
-      !tx = mk_spending_tx op
-              (fromIntegral (unToSelfDelay delay))
-              destScript outputValue 0
-  in SpendingTx tx witnessScript value SIGHASH_ALL
+  in if unSatoshi fee >= unSatoshi value
+     then Nothing
+     else
+       let !outputValue =
+             Satoshi (unSatoshi value - unSatoshi fee)
+           !tx = mk_spending_tx op
+                   (fromIntegral (unToSelfDelay delay))
+                   destScript outputValue 0
+       in Just (SpendingTx tx witnessScript value
+                  SIGHASH_ALL)
 
 -- | Construct an HTLC-timeout second-stage transaction.
 --
@@ -104,7 +110,7 @@ spend_htlc_timeout !ctx !keys =
         (htlc_payment_hash htlc)
         features
       !inputValue =
-        msat_to_sat (htlc_amount_msat htlc)
+        msatToSat (htlc_amount_msat htlc)
       !sighashType = if has_anchors features
         then SIGHASH_SINGLE_ANYONECANPAY
         else SIGHASH_ALL
@@ -134,7 +140,7 @@ spend_htlc_success !ctx !keys =
         (htlc_cltv_expiry htlc)
         features
       !inputValue =
-        msat_to_sat (htlc_amount_msat htlc)
+        msatToSat (htlc_amount_msat htlc)
       !sighashType = if has_anchors features
         then SIGHASH_SINGLE_ANYONECANPAY
         else SIGHASH_ALL
@@ -147,6 +153,8 @@ spend_htlc_success !ctx !keys =
 -- The output of an HTLC-timeout or HTLC-success tx uses the
 -- same to_local script. The caller signs with the local
 -- delayed privkey and uses 'htlc_output_witness_spend'.
+--
+-- Returns 'Nothing' if the fee would exceed the output value.
 spend_htlc_output
   :: OutPoint
   -- ^ Outpoint of the second-stage output.
@@ -158,7 +166,7 @@ spend_htlc_output
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_htlc_output = spend_to_local
 
 -- remote commitment spends -------------------------------------------
@@ -168,6 +176,8 @@ spend_htlc_output = spend_to_local
 --
 -- On the remote commitment, their received HTLCs (our offered)
 -- have timed out and we can sweep them directly.
+--
+-- Returns 'Nothing' if the fee would exceed the output value.
 spend_remote_htlc_timeout
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
@@ -181,7 +191,7 @@ spend_remote_htlc_timeout
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_remote_htlc_timeout !op !value !htlc !keys
     !features !destScript !feerate =
   let !witnessScript = received_htlc_script
@@ -194,20 +204,27 @@ spend_remote_htlc_timeout !op !value !htlc !keys
       !weight = accepted_htlc_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-      !outputValue =
-        Satoshi (unSatoshi value - unSatoshi fee)
-      !locktime =
-        unCltvExpiry (htlc_cltv_expiry htlc)
-      !seqNo = if has_anchors features then 1 else 0
-      !tx = mk_spending_tx op seqNo destScript
-              outputValue locktime
-  in SpendingTx tx witnessScript value SIGHASH_ALL
+  in if unSatoshi fee >= unSatoshi value
+     then Nothing
+     else
+       let !outputValue =
+             Satoshi (unSatoshi value - unSatoshi fee)
+           !locktime =
+             unCltvExpiry (htlc_cltv_expiry htlc)
+           !seqNo =
+             if has_anchors features then 1 else 0
+           !tx = mk_spending_tx op seqNo destScript
+                   outputValue locktime
+       in Just (SpendingTx tx witnessScript value
+                  SIGHASH_ALL)
 
 -- | Spend a received HTLC directly with preimage on the remote
 --   commitment.
 --
 -- On the remote commitment, their offered HTLCs (our received)
 -- can be claimed with the payment preimage.
+--
+-- Returns 'Nothing' if the fee would exceed the output value.
 spend_remote_htlc_preimage
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
@@ -221,7 +238,7 @@ spend_remote_htlc_preimage
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_remote_htlc_preimage !op !value !htlc !keys
     !features !destScript !feerate =
   let !witnessScript = offered_htlc_script
@@ -233,12 +250,17 @@ spend_remote_htlc_preimage !op !value !htlc !keys
       !weight = offered_htlc_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-      !outputValue =
-        Satoshi (unSatoshi value - unSatoshi fee)
-      !seqNo = if has_anchors features then 1 else 0
-      !tx = mk_spending_tx op seqNo destScript
-              outputValue 0
-  in SpendingTx tx witnessScript value SIGHASH_ALL
+  in if unSatoshi fee >= unSatoshi value
+     then Nothing
+     else
+       let !outputValue =
+             Satoshi (unSatoshi value - unSatoshi fee)
+           !seqNo =
+             if has_anchors features then 1 else 0
+           !tx = mk_spending_tx op seqNo destScript
+                   outputValue 0
+       in Just (SpendingTx tx witnessScript value
+                  SIGHASH_ALL)
 
 -- revoked commitment spends ------------------------------------------
 
@@ -246,6 +268,8 @@ spend_remote_htlc_preimage !op !value !htlc !keys
 --
 -- The caller signs with the revocation privkey and uses
 -- 'to_local_witness_revoke' from bolt3.
+--
+-- Returns 'Nothing' if the fee would exceed the output value.
 spend_revoked_to_local
   :: OutPoint
   -- ^ Outpoint of the to_local output.
@@ -257,7 +281,7 @@ spend_revoked_to_local
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_revoked_to_local !op !value !revpk !delay
     !delayedpk !destScript !feerate =
   let !witnessScript =
@@ -265,11 +289,15 @@ spend_revoked_to_local !op !value !revpk !delay
       !weight = to_local_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-      !outputValue =
-        Satoshi (unSatoshi value - unSatoshi fee)
-      !tx = mk_spending_tx op 0xFFFFFFFF destScript
-              outputValue 0
-  in SpendingTx tx witnessScript value SIGHASH_ALL
+  in if unSatoshi fee >= unSatoshi value
+     then Nothing
+     else
+       let !outputValue =
+             Satoshi (unSatoshi value - unSatoshi fee)
+           !tx = mk_spending_tx op 0xFFFFFFFF destScript
+                   outputValue 0
+       in Just (SpendingTx tx witnessScript value
+                  SIGHASH_ALL)
 
 -- | Spend a revoked HTLC output using the revocation key.
 --
@@ -277,6 +305,9 @@ spend_revoked_to_local !op !value !revpk !delay
 -- 'offered_htlc_witness_revoke' or
 -- 'received_htlc_witness_revoke' from bolt3, depending on
 -- the output type.
+--
+-- Returns 'Nothing' if the output type is not an HTLC, or
+-- if the fee would exceed the output value.
 spend_revoked_htlc
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
@@ -305,12 +336,16 @@ spend_revoked_htlc !op !value !otype !revpk !keys
           !weight = offered_htlc_penalty_input_weight
                   + penalty_tx_base_weight
           !fee = spending_fee feerate weight
-          !outputValue =
-            Satoshi (unSatoshi value - unSatoshi fee)
-          !tx = mk_spending_tx op 0xFFFFFFFF destScript
-                  outputValue 0
-      in Just (SpendingTx tx witnessScript value
-                SIGHASH_ALL)
+      in if unSatoshi fee >= unSatoshi value
+         then Nothing
+         else
+           let !outputValue =
+                 Satoshi
+                   (unSatoshi value - unSatoshi fee)
+               !tx = mk_spending_tx op 0xFFFFFFFF
+                       destScript outputValue 0
+           in Just (SpendingTx tx witnessScript value
+                      SIGHASH_ALL)
     OutputReceivedHTLC expiry ->
       let !witnessScript = received_htlc_script
             revpk
@@ -322,12 +357,16 @@ spend_revoked_htlc !op !value !otype !revpk !keys
           !weight = accepted_htlc_penalty_input_weight
                   + penalty_tx_base_weight
           !fee = spending_fee feerate weight
-          !outputValue =
-            Satoshi (unSatoshi value - unSatoshi fee)
-          !tx = mk_spending_tx op 0xFFFFFFFF destScript
-                  outputValue 0
-      in Just (SpendingTx tx witnessScript value
-                SIGHASH_ALL)
+      in if unSatoshi fee >= unSatoshi value
+         then Nothing
+         else
+           let !outputValue =
+                 Satoshi
+                   (unSatoshi value - unSatoshi fee)
+               !tx = mk_spending_tx op 0xFFFFFFFF
+                       destScript outputValue 0
+           in Just (SpendingTx tx witnessScript value
+                      SIGHASH_ALL)
     _ -> Nothing
 
 -- | Spend a revoked second-stage HTLC output (HTLC-timeout or
@@ -336,6 +375,8 @@ spend_revoked_htlc !op !value !otype !revpk !keys
 -- The output of a revoked HTLC-timeout/success tx uses the
 -- to_local script. The caller signs with the revocation privkey
 -- and uses 'htlc_output_witness_revoke'.
+--
+-- Returns 'Nothing' if the fee would exceed the output value.
 spend_revoked_htlc_output
   :: OutPoint
   -- ^ Outpoint of the second-stage output.
@@ -347,7 +388,7 @@ spend_revoked_htlc_output
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_revoked_htlc_output !op !value !revpk !delay
     !delayedpk !destScript !feerate =
   let !witnessScript =
@@ -355,11 +396,15 @@ spend_revoked_htlc_output !op !value !revpk !delay
       !weight = to_local_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-      !outputValue =
-        Satoshi (unSatoshi value - unSatoshi fee)
-      !tx = mk_spending_tx op 0xFFFFFFFF destScript
-              outputValue 0
-  in SpendingTx tx witnessScript value SIGHASH_ALL
+  in if unSatoshi fee >= unSatoshi value
+     then Nothing
+     else
+       let !outputValue =
+             Satoshi (unSatoshi value - unSatoshi fee)
+           !tx = mk_spending_tx op 0xFFFFFFFF destScript
+                   outputValue 0
+       in Just (SpendingTx tx witnessScript value
+                  SIGHASH_ALL)
 
 -- | Construct a batched penalty transaction spending multiple
 --   revoked outputs.
@@ -368,7 +413,9 @@ spend_revoked_htlc_output !op !value !revpk !delay
 -- be resolved in a single penalty transaction (within the
 -- 400,000 weight limit). The caller signs each input with the
 -- revocation privkey.
-spend_revoked_batch :: PenaltyContext -> SpendingTx
+-- | Returns 'Nothing' if the total fee would exceed the
+--   total input value.
+spend_revoked_batch :: PenaltyContext -> Maybe SpendingTx
 spend_revoked_batch !ctx =
   let !outs = pc_outputs ctx
       !destScript = pc_destination ctx
@@ -380,27 +427,32 @@ spend_revoked_batch !ctx =
           (NE.toList outs)
 
       !fee = spending_fee feerate totalWeight
-      !outputValue =
-        Satoshi (unSatoshi totalValue - unSatoshi fee)
+  in if unSatoshi fee >= unSatoshi totalValue
+     then Nothing
+     else
+       let !outputValue =
+             Satoshi
+               (unSatoshi totalValue - unSatoshi fee)
 
-      -- Build inputs
-      !txInputs = fmap mkPenaltyInput outs
+           -- Build inputs
+           !txInputs = fmap mkPenaltyInput outs
 
-      -- Single output
-      !txOutput = TxOut
-        (unSatoshi outputValue)
-        (unScript destScript)
+           -- Single output
+           !txOutput = TxOut
+             (unSatoshi outputValue)
+             (unScript destScript)
 
-      !tx = Tx
-        { tx_version   = 2
-        , tx_inputs    = txInputs
-        , tx_outputs   = txOutput :| []
-        , tx_witnesses = []
-        , tx_locktime  = 0
-        }
+           !tx = Tx
+             { tx_version   = 2
+             , tx_inputs    = txInputs
+             , tx_outputs   = txOutput :| []
+             , tx_witnesses = []
+             , tx_locktime  = 0
+             }
 
-      !witnessScript = Script BS.empty
-  in SpendingTx tx witnessScript totalValue SIGHASH_ALL
+           !witnessScript = Script BS.empty
+       in Just (SpendingTx tx witnessScript totalValue
+                  SIGHASH_ALL)
   where
     go !totalVal !totalWt [] = (totalVal, totalWt)
     go !totalVal !totalWt (uo:rest) =

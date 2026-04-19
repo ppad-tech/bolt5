@@ -177,7 +177,7 @@ classify_benchmarks = bgroup "classify" [
               dummyPaymentHash (CltvExpiry 500000))
   ]
   where
-    dummyPaymentHash = case payment_hash
+    dummyPaymentHash = case paymentHash
       (BS.replicate 32 0xAA) of
         Just ph -> ph
         Nothing -> error "impossible"

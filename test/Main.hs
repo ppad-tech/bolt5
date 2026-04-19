@@ -71,7 +71,7 @@ dummyFundingPubkey :: FundingPubkey
 dummyFundingPubkey = FundingPubkey dummyPubkey
 
 dummyPaymentHash :: PaymentHash
-dummyPaymentHash = case payment_hash dummyHash32 of
+dummyPaymentHash = case paymentHash dummyHash32 of
   Just ph -> ph
   Nothing -> error "impossible"
 
@@ -438,15 +438,16 @@ classify_tests = testGroup "Classify" [
 spend_tests :: TestTree
 spend_tests = testGroup "Spend" [
     testCase "spend_to_local produces valid tx" $ do
-      let stx = B5.spend_to_local
-            dummyOutPoint
-            (Satoshi 100000)
-            dummyRevocationPubkey
-            dummyDelay
-            dummyLocalDelayedPubkey
-            dummyDestScript
-            dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_to_local" $
+        B5.spend_to_local
+          dummyOutPoint
+          (Satoshi 100000)
+          dummyRevocationPubkey
+          dummyDelay
+          dummyLocalDelayedPubkey
+          dummyDestScript
+          dummyFeerate
+      let tx = B5.stx_tx stx
       -- Version should be 2
       tx_version tx @?= 2
       -- Single input
@@ -469,12 +470,13 @@ spend_tests = testGroup "Spend" [
 
   , testCase "spend_to_local fee deduction" $ do
       let value = Satoshi 100000
-          stx = B5.spend_to_local
-            dummyOutPoint value
-            dummyRevocationPubkey dummyDelay
-            dummyLocalDelayedPubkey
-            dummyDestScript dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_to_local" $
+        B5.spend_to_local
+          dummyOutPoint value
+          dummyRevocationPubkey dummyDelay
+          dummyLocalDelayedPubkey
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
           outVal = txout_value
             (head' (tx_outputs tx))
           expectedFee = B5.spending_fee dummyFeerate
@@ -485,12 +487,13 @@ spend_tests = testGroup "Spend" [
                  - unSatoshi expectedFee)
 
   , testCase "spend_revoked_to_local nSequence" $ do
-      let stx = B5.spend_revoked_to_local
-            dummyOutPoint (Satoshi 100000)
-            dummyRevocationPubkey dummyDelay
-            dummyLocalDelayedPubkey
-            dummyDestScript dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_revoked_to_local" $
+        B5.spend_revoked_to_local
+          dummyOutPoint (Satoshi 100000)
+          dummyRevocationPubkey dummyDelay
+          dummyLocalDelayedPubkey
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
           inp = head' (tx_inputs tx)
       txin_sequence inp @?= 0xFFFFFFFF
 
@@ -512,16 +515,18 @@ spend_tests = testGroup "Spend" [
       txin_sequence inp @?= 16
 
   , testCase "spend_htlc_output is spend_to_local" $ do
-      let stx1 = B5.spend_to_local
-            dummyOutPoint (Satoshi 50000)
-            dummyRevocationPubkey dummyDelay
-            dummyLocalDelayedPubkey
-            dummyDestScript dummyFeerate
-          stx2 = B5.spend_htlc_output
-            dummyOutPoint (Satoshi 50000)
-            dummyRevocationPubkey dummyDelay
-            dummyLocalDelayedPubkey
-            dummyDestScript dummyFeerate
+      stx1 <- assertJust "spend_to_local" $
+        B5.spend_to_local
+          dummyOutPoint (Satoshi 50000)
+          dummyRevocationPubkey dummyDelay
+          dummyLocalDelayedPubkey
+          dummyDestScript dummyFeerate
+      stx2 <- assertJust "spend_htlc_output" $
+        B5.spend_htlc_output
+          dummyOutPoint (Satoshi 50000)
+          dummyRevocationPubkey dummyDelay
+          dummyLocalDelayedPubkey
+          dummyDestScript dummyFeerate
       B5.stx_tx stx1 @?= B5.stx_tx stx2
       B5.stx_input_script stx1 @?=
         B5.stx_input_script stx2
@@ -540,8 +545,9 @@ spend_tests = testGroup "Spend" [
             , B5.pc_destination = dummyDestScript
             , B5.pc_feerate = dummyFeerate
             }
-          stx = B5.spend_revoked_batch pctx
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_revoked_batch" $
+        B5.spend_revoked_batch pctx
+      let tx = B5.stx_tx stx
           outVal = txout_value
             (head' (tx_outputs tx))
       -- Output should be less than total input
@@ -564,7 +570,7 @@ htlc_spend_tests = testGroup "HTLC Spend" [
       length (tx_outputs tx) @?= 1
       B5.stx_sighash_type stx @?= SIGHASH_ALL
       B5.stx_input_value stx
-        @?= msat_to_sat (MilliSatoshi 1000000)
+        @?= msatToSat (MilliSatoshi 1000000)
 
   , testCase "spend_htlc_success produces valid tx" $ do
       let ctx = dummyHTLCContext
@@ -597,11 +603,12 @@ htlc_spend_tests = testGroup "HTLC Spend" [
 remote_spend_tests :: TestTree
 remote_spend_tests = testGroup "Remote Spend" [
     testCase "spend_remote_htlc_timeout structure" $ do
-      let stx = B5.spend_remote_htlc_timeout
-            dummyOutPoint (Satoshi 50000)
-            dummyHTLC dummyKeys dummyFeatures
-            dummyDestScript dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_remote_htlc_timeout" $
+        B5.spend_remote_htlc_timeout
+          dummyOutPoint (Satoshi 50000)
+          dummyHTLC dummyKeys dummyFeatures
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
       tx_version tx @?= 2
       length (tx_inputs tx) @?= 1
       B5.stx_sighash_type stx @?= SIGHASH_ALL
@@ -611,20 +618,22 @@ remote_spend_tests = testGroup "Remote Spend" [
 
   , testCase "spend_remote_htlc_timeout fee deduction" $ do
       let value = Satoshi 50000
-          stx = B5.spend_remote_htlc_timeout
-            dummyOutPoint value dummyHTLC
-            dummyKeys dummyFeatures
-            dummyDestScript dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_remote_htlc_timeout" $
+        B5.spend_remote_htlc_timeout
+          dummyOutPoint value dummyHTLC
+          dummyKeys dummyFeatures
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
           outVal = txout_value (head' (tx_outputs tx))
       assertBool "output < input" (outVal < 50000)
 
   , testCase "spend_remote_htlc_preimage structure" $ do
-      let stx = B5.spend_remote_htlc_preimage
-            dummyOutPoint (Satoshi 50000)
-            dummyReceivedHTLC dummyKeys
-            dummyFeatures dummyDestScript dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_remote_htlc_preimage" $
+        B5.spend_remote_htlc_preimage
+          dummyOutPoint (Satoshi 50000)
+          dummyReceivedHTLC dummyKeys
+          dummyFeatures dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
       tx_version tx @?= 2
       B5.stx_sighash_type stx @?= SIGHASH_ALL
       -- locktime should be 0 for preimage claims
@@ -632,11 +641,12 @@ remote_spend_tests = testGroup "Remote Spend" [
 
   , testCase "spend_remote_htlc_timeout anchors seq" $
       do
-      let stx = B5.spend_remote_htlc_timeout
-            dummyOutPoint (Satoshi 50000)
-            dummyHTLC dummyKeys dummyFeaturesAnchors
-            dummyDestScript dummyFeerate
-          tx = B5.stx_tx stx
+      stx <- assertJust "spend_remote_htlc_timeout" $
+        B5.spend_remote_htlc_timeout
+          dummyOutPoint (Satoshi 50000)
+          dummyHTLC dummyKeys dummyFeaturesAnchors
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
           inp = head' (tx_inputs tx)
       txin_sequence inp @?= 1
   ]
@@ -729,21 +739,23 @@ property_tests = testGroup "Properties" [
       \(Positive val) ->
         let value = Satoshi
               (fromIntegral (val :: Int) + 100000)
-            stx = B5.spend_to_local
-              dummyOutPoint value
-              dummyRevocationPubkey dummyDelay
-              dummyLocalDelayedPubkey
-              dummyDestScript (FeeratePerKw 253)
-            tx = B5.stx_tx stx
-            outVal = txout_value
-              (head' (tx_outputs tx))
             expectedFee = B5.spending_fee
               (FeeratePerKw 253)
               (B5.to_local_penalty_input_weight
                + B5.penalty_tx_base_weight)
-        in Satoshi outVal ==
-           Satoshi (unSatoshi value
-                    - unSatoshi expectedFee)
+        in case B5.spend_to_local
+                  dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey
+                  dummyDestScript (FeeratePerKw 253) of
+             Nothing -> False
+             Just stx ->
+               let tx = B5.stx_tx stx
+                   outVal = txout_value
+                     (head' (tx_outputs tx))
+               in Satoshi outVal ==
+                  Satoshi (unSatoshi value
+                           - unSatoshi expectedFee)
 
   , testProperty "htlc_timed_out monotonic" $
       \(NonNegative h1) (NonNegative h2) ->
@@ -762,3 +774,7 @@ property_tests = testGroup "Properties" [
 -- | Total head for NonEmpty.
 head' :: NonEmpty a -> a
 head' (x :| _) = x
+
+-- | Assert a Maybe is Just, failing with a message otherwise.
+assertJust :: String -> Maybe a -> IO a
+assertJust msg = maybe (assertFailure msg) pure

@@ -265,7 +265,7 @@ classifyRevokedOutput !txid !revpk !idx !out =
 -- commitment, the witness contains the preimage. The witness
 -- stack for a preimage claim is:
 --
--- @\<remotehtlcsig\> \<payment_preimage\>@
+-- @\<remotehtlcsig\> \<paymentPreimage\>@
 --
 -- The preimage is the second item (32 bytes) and must hash to
 -- the expected payment hash.
@@ -274,7 +274,7 @@ extract_preimage_offered (Witness items) =
   case items of
     [_sig, preimageBytes]
       | BS.length preimageBytes == 32 ->
-          payment_preimage preimageBytes
+          paymentPreimage preimageBytes
     _ -> Nothing
 
 -- | Extract a payment preimage from an HTLC-success transaction
@@ -284,7 +284,7 @@ extract_preimage_offered (Witness items) =
 -- commitment to claim a received HTLC, the witness contains the
 -- preimage. The witness stack is:
 --
--- @0 \<remotehtlcsig\> \<localhtlcsig\> \<payment_preimage\>@
+-- @0 \<remotehtlcsig\> \<localhtlcsig\> \<paymentPreimage\>@
 --
 -- The preimage is the fourth item (32 bytes).
 extract_preimage_htlc_success
@@ -293,7 +293,7 @@ extract_preimage_htlc_success (Witness items) =
   case items of
     [_zero, _remoteSig, _localSig, preimageBytes]
       | BS.length preimageBytes == 32 ->
-          payment_preimage preimageBytes
+          paymentPreimage preimageBytes
     _ -> Nothing
 
 -- timeout check ------------------------------------------------------
