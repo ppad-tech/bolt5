@@ -18,7 +18,11 @@ main :: IO ()
 main = defaultMain $ testGroup "ppad-bolt5" [
     types_tests
   , detect_tests
+  , classify_tests
   , spend_tests
+  , htlc_spend_tests
+  , remote_spend_tests
+  , revoked_htlc_spend_tests
   , weight_tests
   , property_tests
   ]
@@ -111,6 +115,94 @@ dummyReceivedHTLC :: HTLC
 dummyReceivedHTLC = dummyHTLC
   { htlc_direction = HTLCReceived }
 
+dummyHTLCContext :: HTLCContext
+dummyHTLCContext = HTLCContext
+  { hc_commitment_txid = dummyTxId
+  , hc_output_index = 0
+  , hc_htlc = dummyHTLC
+  , hc_to_self_delay = dummyDelay
+  , hc_feerate = dummyFeerate
+  , hc_features = dummyFeatures
+  , hc_revocation_pubkey = dummyRevocationPubkey
+  , hc_local_delayed = dummyLocalDelayedPubkey
+  }
+
+-- Script that matches what findHTLC expects for offered
+offeredScript :: Script
+offeredScript = to_p2wsh $ offered_htlc_script
+  dummyRevocationPubkey
+  dummyRemoteHtlcPubkey
+  dummyLocalHtlcPubkey
+  dummyPaymentHash
+  dummyFeatures
+
+-- Script that matches what findHTLC expects for received
+receivedScript :: Script
+receivedScript = to_p2wsh $ received_htlc_script
+  dummyRevocationPubkey
+  dummyRemoteHtlcPubkey
+  dummyLocalHtlcPubkey
+  dummyPaymentHash
+  (CltvExpiry 500000)
+  dummyFeatures
+
+toLocalScript :: Script
+toLocalScript = to_p2wsh $ to_local_script
+  dummyRevocationPubkey dummyDelay
+  dummyLocalDelayedPubkey
+
+-- CommitmentTx with to_local + to_remote outputs
+dummyLocalCommitTx :: CommitmentTx
+dummyLocalCommitTx = CommitmentTx
+  { ctx_version = 2
+  , ctx_locktime = Locktime 0
+  , ctx_input_outpoint = dummyOutPoint
+  , ctx_input_sequence = Sequence 0
+  , ctx_outputs =
+      [ TxOutput (Satoshi 50000) toLocalScript
+          OutputToLocal
+      , TxOutput (Satoshi 30000) dummyDestScript
+          OutputToRemote
+      ]
+  , ctx_funding_script = dummyDestScript
+  }
+
+-- CommitmentTx with HTLC outputs
+dummyLocalCommitWithHTLCs :: CommitmentTx
+dummyLocalCommitWithHTLCs = CommitmentTx
+  { ctx_version = 2
+  , ctx_locktime = Locktime 0
+  , ctx_input_outpoint = dummyOutPoint
+  , ctx_input_sequence = Sequence 0
+  , ctx_outputs =
+      [ TxOutput (Satoshi 50000) toLocalScript
+          OutputToLocal
+      , TxOutput (Satoshi 30000) dummyDestScript
+          OutputToRemote
+      , TxOutput (Satoshi 10000) offeredScript
+          (OutputOfferedHTLC (CltvExpiry 500000))
+      , TxOutput (Satoshi 10000) receivedScript
+          (OutputReceivedHTLC (CltvExpiry 500000))
+      ]
+  , ctx_funding_script = dummyDestScript
+  }
+
+-- A distinct CommitmentTx (different locktime)
+dummyRemoteCommitTx :: CommitmentTx
+dummyRemoteCommitTx = CommitmentTx
+  { ctx_version = 2
+  , ctx_locktime = Locktime 1
+  , ctx_input_outpoint = dummyOutPoint
+  , ctx_input_sequence = Sequence 0
+  , ctx_outputs =
+      [ TxOutput (Satoshi 40000) toLocalScript
+          OutputToLocal
+      , TxOutput (Satoshi 20000) dummyDestScript
+          OutputToRemote
+      ]
+  , ctx_funding_script = dummyDestScript
+  }
+
 -- types tests --------------------------------------------------------
 
 types_tests :: TestTree
@@ -194,6 +286,151 @@ detect_tests = testGroup "Detect" [
       let htlc = dummyHTLC
             { htlc_cltv_expiry = CltvExpiry 500000 }
       B5.htlc_timed_out 499999 htlc @?= False
+  ]
+
+-- classify tests -----------------------------------------------------
+
+classify_tests :: TestTree
+classify_tests = testGroup "Classify" [
+    testCase "identify_close - local commit" $ do
+      case encode_tx_for_signing dummyLocalCommitTx of
+        Nothing -> assertFailure "encode failed"
+        Just localBytes ->
+          B5.identify_close
+            dummyLocalCommitTx
+            dummyRemoteCommitTx
+            localBytes
+          @?= Just B5.LocalCommitClose
+
+  , testCase "identify_close - remote commit" $ do
+      case encode_tx_for_signing dummyRemoteCommitTx of
+        Nothing -> assertFailure "encode failed"
+        Just remoteBytes ->
+          B5.identify_close
+            dummyLocalCommitTx
+            dummyRemoteCommitTx
+            remoteBytes
+          @?= Just B5.RemoteCommitClose
+
+  , testCase "identify_close - no match" $ do
+      B5.identify_close
+        dummyLocalCommitTx
+        dummyRemoteCommitTx
+        "unknown bytes"
+      @?= Nothing
+
+  , testCase "classify_local - to_local and to_remote" $ do
+      let outs = B5.classify_local_commit_outputs
+            dummyLocalCommitTx dummyKeys
+            dummyDelay dummyFeatures []
+      length outs @?= 2
+      case outs of
+        [o1, o2] -> do
+          case B5.uo_type o1 of
+            B5.SpendToLocal d rk dk -> do
+              d @?= dummyDelay
+              rk @?= dummyRevocationPubkey
+              dk @?= dummyLocalDelayedPubkey
+            other -> assertFailure $
+              "expected SpendToLocal, got " <> show other
+          B5.uo_type o2 @?= B5.Resolved
+        _ -> assertFailure "expected 2 outputs"
+
+  , testCase "classify_local - HTLC outputs" $ do
+      let outs = B5.classify_local_commit_outputs
+            dummyLocalCommitWithHTLCs dummyKeys
+            dummyDelay dummyFeatures
+            [dummyHTLC, dummyReceivedHTLC]
+      length outs @?= 4
+      case outs of
+        [_, _, o3, o4] -> do
+          case B5.uo_type o3 of
+            B5.SpendHTLCTimeout _ _ _ -> pure ()
+            other -> assertFailure $
+              "expected SpendHTLCTimeout, got "
+              <> show other
+          case B5.uo_type o4 of
+            B5.SpendHTLCSuccess _ _ _ -> pure ()
+            other -> assertFailure $
+              "expected SpendHTLCSuccess, got "
+              <> show other
+        _ -> assertFailure "expected 4 outputs"
+
+  , testCase "classify_remote - HTLC outputs" $ do
+      let commitTx = CommitmentTx
+            { ctx_version = 2
+            , ctx_locktime = Locktime 0
+            , ctx_input_outpoint = dummyOutPoint
+            , ctx_input_sequence = Sequence 0
+            , ctx_outputs =
+                [ TxOutput (Satoshi 50000) toLocalScript
+                    OutputToLocal
+                , TxOutput (Satoshi 10000) offeredScript
+                    (OutputOfferedHTLC
+                      (CltvExpiry 500000))
+                , TxOutput (Satoshi 10000) receivedScript
+                    (OutputReceivedHTLC
+                      (CltvExpiry 500000))
+                ]
+            , ctx_funding_script = dummyDestScript
+            }
+          outs = B5.classify_remote_commit_outputs
+            commitTx dummyKeys dummyFeatures
+            [dummyHTLC, dummyReceivedHTLC]
+      length outs @?= 3
+      case outs of
+        [o1, o2, o3] -> do
+          B5.uo_type o1 @?= B5.Resolved
+          case B5.uo_type o2 of
+            B5.SpendHTLCPreimageDirect _ -> pure ()
+            other -> assertFailure $
+              "expected SpendHTLCPreimageDirect, got "
+              <> show other
+          case B5.uo_type o3 of
+            B5.SpendHTLCTimeoutDirect _ -> pure ()
+            other -> assertFailure $
+              "expected SpendHTLCTimeoutDirect, got "
+              <> show other
+        _ -> assertFailure "expected 3 outputs"
+
+  , testCase "classify_revoked - to_local revoked" $ do
+      let outs = B5.classify_revoked_commit_outputs
+            dummyLocalCommitWithHTLCs dummyKeys
+            dummyRevocationPubkey dummyFeatures
+            [dummyHTLC, dummyReceivedHTLC]
+      length outs @?= 4
+      case outs of
+        [o1, o2, o3, o4] -> do
+          B5.uo_type o1
+            @?= B5.Revoke dummyRevocationPubkey
+          B5.uo_type o2 @?= B5.Resolved
+          case B5.uo_type o3 of
+            B5.RevokeHTLC _ (OutputOfferedHTLC _) ->
+              pure ()
+            other -> assertFailure $
+              "expected RevokeHTLC offered, got "
+              <> show other
+          case B5.uo_type o4 of
+            B5.RevokeHTLC _ (OutputReceivedHTLC _) ->
+              pure ()
+            other -> assertFailure $
+              "expected RevokeHTLC received, got "
+              <> show other
+        _ -> assertFailure "expected 4 outputs"
+
+  , testCase "classify_local - empty commit" $ do
+      let emptyCommit = CommitmentTx
+            { ctx_version = 2
+            , ctx_locktime = Locktime 0
+            , ctx_input_outpoint = dummyOutPoint
+            , ctx_input_sequence = Sequence 0
+            , ctx_outputs = []
+            , ctx_funding_script = dummyDestScript
+            }
+      B5.classify_local_commit_outputs
+        emptyCommit dummyKeys dummyDelay
+        dummyFeatures []
+      @?= []
   ]
 
 -- spend tests --------------------------------------------------------
@@ -312,6 +549,141 @@ spend_tests = testGroup "Spend" [
         (outVal < 80000)
       -- Should have 2 inputs
       length (tx_inputs tx) @?= 2
+  ]
+
+-- htlc spend tests ---------------------------------------------------
+
+htlc_spend_tests :: TestTree
+htlc_spend_tests = testGroup "HTLC Spend" [
+    testCase "spend_htlc_timeout produces valid tx" $ do
+      let stx = B5.spend_htlc_timeout
+            dummyHTLCContext dummyKeys
+          tx = B5.stx_tx stx
+      tx_version tx @?= 2
+      length (tx_inputs tx) @?= 1
+      length (tx_outputs tx) @?= 1
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+      B5.stx_input_value stx
+        @?= msat_to_sat (MilliSatoshi 1000000)
+
+  , testCase "spend_htlc_success produces valid tx" $ do
+      let ctx = dummyHTLCContext
+            { hc_htlc = dummyReceivedHTLC }
+          stx = B5.spend_htlc_success ctx dummyKeys
+          tx = B5.stx_tx stx
+      tx_version tx @?= 2
+      length (tx_inputs tx) @?= 1
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+
+  , testCase "spend_htlc_timeout anchors sighash" $ do
+      let ctx = dummyHTLCContext
+            { hc_features = dummyFeaturesAnchors }
+          stx = B5.spend_htlc_timeout ctx dummyKeys
+      B5.stx_sighash_type stx
+        @?= SIGHASH_SINGLE_ANYONECANPAY
+
+  , testCase "spend_htlc_success anchors sighash" $ do
+      let ctx = dummyHTLCContext
+            { hc_htlc = dummyReceivedHTLC
+            , hc_features = dummyFeaturesAnchors
+            }
+          stx = B5.spend_htlc_success ctx dummyKeys
+      B5.stx_sighash_type stx
+        @?= SIGHASH_SINGLE_ANYONECANPAY
+  ]
+
+-- remote spend tests -------------------------------------------------
+
+remote_spend_tests :: TestTree
+remote_spend_tests = testGroup "Remote Spend" [
+    testCase "spend_remote_htlc_timeout structure" $ do
+      let stx = B5.spend_remote_htlc_timeout
+            dummyOutPoint (Satoshi 50000)
+            dummyHTLC dummyKeys dummyFeatures
+            dummyDestScript dummyFeerate
+          tx = B5.stx_tx stx
+      tx_version tx @?= 2
+      length (tx_inputs tx) @?= 1
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+      B5.stx_input_value stx @?= Satoshi 50000
+      -- locktime should be HTLC CLTV expiry
+      tx_locktime tx @?= 500000
+
+  , testCase "spend_remote_htlc_timeout fee deduction" $ do
+      let value = Satoshi 50000
+          stx = B5.spend_remote_htlc_timeout
+            dummyOutPoint value dummyHTLC
+            dummyKeys dummyFeatures
+            dummyDestScript dummyFeerate
+          tx = B5.stx_tx stx
+          outVal = txout_value (head' (tx_outputs tx))
+      assertBool "output < input" (outVal < 50000)
+
+  , testCase "spend_remote_htlc_preimage structure" $ do
+      let stx = B5.spend_remote_htlc_preimage
+            dummyOutPoint (Satoshi 50000)
+            dummyReceivedHTLC dummyKeys
+            dummyFeatures dummyDestScript dummyFeerate
+          tx = B5.stx_tx stx
+      tx_version tx @?= 2
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+      -- locktime should be 0 for preimage claims
+      tx_locktime tx @?= 0
+
+  , testCase "spend_remote_htlc_timeout anchors seq" $
+      do
+      let stx = B5.spend_remote_htlc_timeout
+            dummyOutPoint (Satoshi 50000)
+            dummyHTLC dummyKeys dummyFeaturesAnchors
+            dummyDestScript dummyFeerate
+          tx = B5.stx_tx stx
+          inp = head' (tx_inputs tx)
+      txin_sequence inp @?= 1
+  ]
+
+-- revoked htlc spend tests ------------------------------------------
+
+revoked_htlc_spend_tests :: TestTree
+revoked_htlc_spend_tests = testGroup "Revoked HTLC Spend" [
+    testCase "spend_revoked_htlc - offered" $ do
+      case B5.spend_revoked_htlc
+            dummyOutPoint (Satoshi 50000)
+            (OutputOfferedHTLC (CltvExpiry 500000))
+            dummyRevocationPubkey dummyKeys
+            dummyFeatures dummyPaymentHash
+            dummyDestScript dummyFeerate of
+        Nothing -> assertFailure "expected Just"
+        Just stx -> do
+          let tx = B5.stx_tx stx
+          tx_version tx @?= 2
+          B5.stx_sighash_type stx @?= SIGHASH_ALL
+          let inp = head' (tx_inputs tx)
+          txin_sequence inp @?= 0xFFFFFFFF
+
+  , testCase "spend_revoked_htlc - received" $ do
+      case B5.spend_revoked_htlc
+            dummyOutPoint (Satoshi 50000)
+            (OutputReceivedHTLC (CltvExpiry 500000))
+            dummyRevocationPubkey dummyKeys
+            dummyFeatures dummyPaymentHash
+            dummyDestScript dummyFeerate of
+        Nothing -> assertFailure "expected Just"
+        Just stx -> do
+          B5.stx_sighash_type stx @?= SIGHASH_ALL
+          let tx = B5.stx_tx stx
+              outVal = txout_value
+                (head' (tx_outputs tx))
+          assertBool "output < input"
+            (outVal < 50000)
+
+  , testCase "spend_revoked_htlc - invalid type" $ do
+      B5.spend_revoked_htlc
+        dummyOutPoint (Satoshi 50000)
+        OutputToLocal
+        dummyRevocationPubkey dummyKeys
+        dummyFeatures dummyPaymentHash
+        dummyDestScript dummyFeerate
+      @?= Nothing
   ]
 
 -- weight tests -------------------------------------------------------
