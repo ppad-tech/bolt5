@@ -272,6 +272,16 @@ detect_tests = testGroup "Detect" [
       let wit = Witness [BS.empty, dummyPreimage]
       B5.extract_preimage_htlc_success wit @?= Nothing
 
+  , testCase "extract_preimage_htlc_success - wrong length" $
+      do
+      let zero = BS.empty
+          remoteSig = BS.replicate 72 0x30
+          localSig = BS.replicate 72 0x30
+          badPreimage = BS.replicate 31 0xBB
+          wit = Witness
+            [zero, remoteSig, localSig, badPreimage]
+      B5.extract_preimage_htlc_success wit @?= Nothing
+
   , testCase "htlc_timed_out - at expiry" $ do
       let htlc = dummyHTLC
             { htlc_cltv_expiry = CltvExpiry 500000 }
@@ -418,6 +428,62 @@ classify_tests = testGroup "Classify" [
               <> show other
         _ -> assertFailure "expected 4 outputs"
 
+  , testCase "classify_local - anchor outputs" $ do
+      let anchorScript = to_p2wsh $
+            anchor_script dummyFundingPubkey
+          remoteFundPk = ck_remote_funding dummyKeys
+          remoteAnchorScript = to_p2wsh $
+            anchor_script remoteFundPk
+          commitTx = CommitmentTx
+            { ctx_version = 2
+            , ctx_locktime = Locktime 0
+            , ctx_input_outpoint = dummyOutPoint
+            , ctx_input_sequence = Sequence 0
+            , ctx_outputs =
+                [ TxOutput (Satoshi 330) anchorScript
+                    OutputLocalAnchor
+                , TxOutput (Satoshi 330) remoteAnchorScript
+                    OutputRemoteAnchor
+                ]
+            , ctx_funding_script = dummyDestScript
+            }
+          outs = B5.classify_local_commit_outputs
+            commitTx dummyKeys dummyDelay
+            dummyFeaturesAnchors []
+      length outs @?= 2
+      case outs of
+        [o1, o2] -> do
+          case B5.uo_type o1 of
+            B5.AnchorSpend _ -> pure ()
+            other -> assertFailure $
+              "expected AnchorSpend, got "
+              <> show other
+          B5.uo_type o2 @?= B5.Resolved
+        _ -> assertFailure "expected 2 outputs"
+
+  , testCase "classify_remote - non-HTLC outputs" $ do
+      let outs = B5.classify_remote_commit_outputs
+            dummyRemoteCommitTx dummyKeys
+            dummyFeatures []
+      length outs @?= 2
+      case outs of
+        [o1, o2] -> do
+          B5.uo_type o1 @?= B5.Resolved
+          B5.uo_type o2 @?= B5.Resolved
+        _ -> assertFailure "expected 2 outputs"
+
+  , testCase "classify_local - unmatched HTLC" $ do
+      let outs = B5.classify_local_commit_outputs
+            dummyLocalCommitWithHTLCs dummyKeys
+            dummyDelay dummyFeatures []
+      -- With no HTLCs passed, HTLC outputs -> Resolved
+      length outs @?= 4
+      case outs of
+        [_, _, o3, o4] -> do
+          B5.uo_type o3 @?= B5.Resolved
+          B5.uo_type o4 @?= B5.Resolved
+        _ -> assertFailure "expected 4 outputs"
+
   , testCase "classify_local - empty commit" $ do
       let emptyCommit = CommitmentTx
             { ctx_version = 2
@@ -555,6 +621,71 @@ spend_tests = testGroup "Spend" [
         (outVal < 80000)
       -- Should have 2 inputs
       length (tx_inputs tx) @?= 2
+
+  , testCase "spend_revoked_batch single element" $ do
+      let uo = B5.UnresolvedOutput
+            dummyOutPoint (Satoshi 50000)
+            (B5.Revoke dummyRevocationPubkey)
+          pctx = B5.PenaltyContext
+            { B5.pc_outputs = uo :| []
+            , B5.pc_revocation_key =
+                dummyRevocationPubkey
+            , B5.pc_destination = dummyDestScript
+            , B5.pc_feerate = dummyFeerate
+            }
+      stx <- assertJust "spend_revoked_batch" $
+        B5.spend_revoked_batch pctx
+      let tx = B5.stx_tx stx
+      length (tx_inputs tx) @?= 1
+      length (tx_outputs tx) @?= 1
+
+  , testCase "spend_revoked_batch mixed types" $ do
+      let op1 = OutPoint dummyTxId 0
+          op2 = OutPoint dummyTxId 1
+          op3 = OutPoint dummyTxId 2
+          uo1 = B5.UnresolvedOutput op1
+            (Satoshi 50000)
+            (B5.Revoke dummyRevocationPubkey)
+          uo2 = B5.UnresolvedOutput op2
+            (Satoshi 10000)
+            (B5.RevokeHTLC dummyRevocationPubkey
+              (OutputOfferedHTLC (CltvExpiry 500000)))
+          uo3 = B5.UnresolvedOutput op3
+            (Satoshi 10000)
+            (B5.RevokeHTLC dummyRevocationPubkey
+              (OutputReceivedHTLC (CltvExpiry 500000)))
+          pctx = B5.PenaltyContext
+            { B5.pc_outputs = uo1 :| [uo2, uo3]
+            , B5.pc_revocation_key =
+                dummyRevocationPubkey
+            , B5.pc_destination = dummyDestScript
+            , B5.pc_feerate = dummyFeerate
+            }
+      stx <- assertJust "spend_revoked_batch" $
+        B5.spend_revoked_batch pctx
+      let tx = B5.stx_tx stx
+      length (tx_inputs tx) @?= 3
+
+  , testCase "spend_to_local fee underflow" $ do
+      B5.spend_to_local
+        dummyOutPoint (Satoshi 1)
+        dummyRevocationPubkey dummyDelay
+        dummyLocalDelayedPubkey
+        dummyDestScript dummyFeerate
+      @?= Nothing
+
+  , testCase "spend_revoked_batch fee underflow" $ do
+      let uo = B5.UnresolvedOutput
+            dummyOutPoint (Satoshi 1)
+            (B5.Revoke dummyRevocationPubkey)
+          pctx = B5.PenaltyContext
+            { B5.pc_outputs = uo :| []
+            , B5.pc_revocation_key =
+                dummyRevocationPubkey
+            , B5.pc_destination = dummyDestScript
+            , B5.pc_feerate = dummyFeerate
+            }
+      B5.spend_revoked_batch pctx @?= Nothing
   ]
 
 -- htlc spend tests ---------------------------------------------------
@@ -649,6 +780,27 @@ remote_spend_tests = testGroup "Remote Spend" [
       let tx = B5.stx_tx stx
           inp = head' (tx_inputs tx)
       txin_sequence inp @?= 1
+
+  , testCase "spend_remote_htlc_timeout no-anchor seq" $
+      do
+      stx <- assertJust "spend_remote_htlc_timeout" $
+        B5.spend_remote_htlc_timeout
+          dummyOutPoint (Satoshi 50000)
+          dummyHTLC dummyKeys dummyFeatures
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
+          inp = head' (tx_inputs tx)
+      txin_sequence inp @?= 0
+
+  , testCase "spend_remote_htlc_preimage nSequence" $ do
+      stx <- assertJust "spend_remote_htlc_preimage" $
+        B5.spend_remote_htlc_preimage
+          dummyOutPoint (Satoshi 50000)
+          dummyReceivedHTLC dummyKeys
+          dummyFeatures dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
+          inp = head' (tx_inputs tx)
+      txin_sequence inp @?= 0
   ]
 
 -- revoked htlc spend tests ------------------------------------------
@@ -694,6 +846,19 @@ revoked_htlc_spend_tests = testGroup "Revoked HTLC Spend" [
         dummyFeatures dummyPaymentHash
         dummyDestScript dummyFeerate
       @?= Nothing
+
+  , testCase "spend_revoked_htlc_output structure" $ do
+      stx <- assertJust "spend_revoked_htlc_output" $
+        B5.spend_revoked_htlc_output
+          dummyOutPoint (Satoshi 50000)
+          dummyRevocationPubkey dummyDelay
+          dummyLocalDelayedPubkey
+          dummyDestScript dummyFeerate
+      let tx = B5.stx_tx stx
+      tx_version tx @?= 2
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+      let inp = head' (tx_inputs tx)
+      txin_sequence inp @?= 0xFFFFFFFF
   ]
 
 -- weight tests -------------------------------------------------------
