@@ -37,9 +37,10 @@ module Lightning.Protocol.BOLT5.Spend (
   , spend_anchor_anyone
   ) where
 
-import Bitcoin.Prim.Tx (Tx(..), TxIn(..), TxOut(..))
+import Bitcoin.Prim.Tx (TxOut(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
 import Data.Word (Word32)
 import qualified Data.ByteString as BS
 import Lightning.Protocol.BOLT3 hiding
@@ -290,40 +291,44 @@ spend_revoked_htlc
   -> Script
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
-  -> SpendingTx
+  -> Maybe SpendingTx
 spend_revoked_htlc !op !value !otype !revpk !keys
     !features !ph !destScript !feerate =
-  let !(witnessScript, inputWeight) = case otype of
-        OutputOfferedHTLC _ ->
-          ( offered_htlc_script
-              revpk
-              (ck_remote_htlc keys)
-              (ck_local_htlc keys)
-              ph
-              features
-          , offered_htlc_penalty_input_weight
-          )
-        OutputReceivedHTLC expiry ->
-          ( received_htlc_script
-              revpk
-              (ck_remote_htlc keys)
-              (ck_local_htlc keys)
-              ph
-              expiry
-              features
-          , accepted_htlc_penalty_input_weight
-          )
-        _ ->
-          ( Script BS.empty
-          , 0
-          )
-      !weight = inputWeight + penalty_tx_base_weight
-      !fee = spending_fee feerate weight
-      !outputValue =
-        Satoshi (unSatoshi value - unSatoshi fee)
-      !tx = mk_spending_tx op 0xFFFFFFFF destScript
-              outputValue 0
-  in SpendingTx tx witnessScript value SIGHASH_ALL
+  case otype of
+    OutputOfferedHTLC _ ->
+      let !witnessScript = offered_htlc_script
+            revpk
+            (ck_remote_htlc keys)
+            (ck_local_htlc keys)
+            ph
+            features
+          !weight = offered_htlc_penalty_input_weight
+                  + penalty_tx_base_weight
+          !fee = spending_fee feerate weight
+          !outputValue =
+            Satoshi (unSatoshi value - unSatoshi fee)
+          !tx = mk_spending_tx op 0xFFFFFFFF destScript
+                  outputValue 0
+      in Just (SpendingTx tx witnessScript value
+                SIGHASH_ALL)
+    OutputReceivedHTLC expiry ->
+      let !witnessScript = received_htlc_script
+            revpk
+            (ck_remote_htlc keys)
+            (ck_local_htlc keys)
+            ph
+            expiry
+            features
+          !weight = accepted_htlc_penalty_input_weight
+                  + penalty_tx_base_weight
+          !fee = spending_fee feerate weight
+          !outputValue =
+            Satoshi (unSatoshi value - unSatoshi fee)
+          !tx = mk_spending_tx op 0xFFFFFFFF destScript
+                  outputValue 0
+      in Just (SpendingTx tx witnessScript value
+                SIGHASH_ALL)
+    _ -> Nothing
 
 -- | Spend a revoked second-stage HTLC output (HTLC-timeout or
 --   HTLC-success output) using the revocation key.
@@ -371,18 +376,15 @@ spend_revoked_batch !ctx =
 
       -- Calculate total input value and weight
       !(totalValue, totalWeight) =
-        go (Satoshi 0) penalty_tx_base_weight outs
+        go (Satoshi 0) penalty_tx_base_weight
+          (NE.toList outs)
 
       !fee = spending_fee feerate totalWeight
       !outputValue =
         Satoshi (unSatoshi totalValue - unSatoshi fee)
 
       -- Build inputs
-      !inputs = map mkPenaltyInput outs
-      !txInputs = case inputs of
-        []     -> error
-          "spend_revoked_batch: no outputs"
-        (i:is) -> i :| is
+      !txInputs = fmap mkPenaltyInput outs
 
       -- Single output
       !txOutput = TxOut

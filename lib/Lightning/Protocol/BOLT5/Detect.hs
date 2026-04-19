@@ -38,57 +38,32 @@ import Lightning.Protocol.BOLT5.Types
 -- | Identify the type of channel close from a transaction that
 --   spends the funding output.
 --
--- Checks the transaction against known commitment and closing
--- formats to determine whether it's a mutual close, local
--- commitment, remote commitment, or revoked commitment.
+-- Compares the on-chain transaction bytes against the known
+-- local and remote commitment transaction serializations
+-- (stripped/unsigned) to determine whether it's a local or
+-- remote commitment close.
 --
--- Returns 'Nothing' if the transaction doesn't match any known
--- format.
---
--- The 'SecretStore' is checked to determine if the remote
--- commitment is revoked (i.e. we have the per-commitment secret
--- for that commitment number).
+-- Returns 'Nothing' if the transaction doesn't match either
+-- commitment. Mutual close and revoked commitment detection
+-- require additional checks by the caller (e.g. comparing
+-- closing tx format, checking a secret store for older
+-- commitment numbers).
 identify_close
-  :: OutPoint
-  -- ^ Funding outpoint.
-  -> CommitmentKeys
-  -- ^ Keys for our local commitment.
-  -> CommitmentKeys
-  -- ^ Keys for the remote commitment.
-  -> SecretStore
-  -- ^ Store of received per-commitment secrets.
-  -> ClosingContext
-  -- ^ Closing tx context (for mutual close matching).
-  -> CommitmentTx
+  :: CommitmentTx
   -- ^ Our local commitment tx.
   -> CommitmentTx
   -- ^ The remote commitment tx (current).
   -> BS.ByteString
   -- ^ Raw serialized transaction found on chain.
   -> Maybe CloseType
-identify_close
-  !_fundingOutpoint
-  !_localKeys
-  !_remoteKeys
-  !_secretStore
-  !_closingCtx
-  !localCommitTx
-  !remoteCommitTx
-  !onChainBytes =
-    -- Compare the on-chain tx bytes against known tx
-    -- serializations. We compare stripped (unsigned, legacy)
-    -- serializations.
+identify_close !localCommitTx !remoteCommitTx
+    !onChainBytes =
     let !localBytes = encode_tx_for_signing localCommitTx
         !remoteBytes = encode_tx_for_signing remoteCommitTx
     in  if localBytes == Just onChainBytes
         then Just LocalCommitClose
         else if remoteBytes == Just onChainBytes
         then Just RemoteCommitClose
-        -- For mutual close and revoked detection, the caller
-        -- should perform additional checks (e.g. comparing
-        -- closing tx format, checking secret store for older
-        -- commitment numbers). This function provides the
-        -- basic identification.
         else Nothing
 
 -- output classification ----------------------------------------------

@@ -41,6 +41,7 @@ module Lightning.Protocol.BOLT5.Types (
 
 import Bitcoin.Prim.Tx (Tx(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
+import Data.List.NonEmpty (NonEmpty)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT3.Types
@@ -93,9 +94,6 @@ data OutputResolution
   | SpendHTLCPreimageDirect !HTLC
     -- ^ Spend HTLC directly with preimage (remote commit,
     --   remote offer).
-  | SpendSecondStage
-      !ToSelfDelay !RevocationPubkey !LocalDelayedPubkey
-    -- ^ Spend second-stage HTLC output after CSV delay.
   | Revoke !RevocationPubkey
     -- ^ Spend revoked to_local with revocation key.
   | RevokeHTLC !RevocationPubkey !OutputType
@@ -125,8 +123,8 @@ data SpendingTx = SpendingTx
 
 -- | Context for constructing batched penalty transactions.
 data PenaltyContext = PenaltyContext
-  { pc_outputs        :: ![UnresolvedOutput]
-    -- ^ Revoked outputs to sweep.
+  { pc_outputs        :: !(NonEmpty UnresolvedOutput)
+    -- ^ Revoked outputs to sweep (must be non-empty).
   , pc_revocation_key :: !RevocationPubkey
     -- ^ Revocation pubkey for all outputs.
   , pc_destination    :: !Script
