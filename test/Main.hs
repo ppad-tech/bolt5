@@ -932,6 +932,88 @@ property_tests = testGroup "Properties" [
            then not (B5.htlc_timed_out height1 htlc)
                 || B5.htlc_timed_out height2 htlc
            else True
+
+  , testProperty "output + fee = input (spend_to_local)" $
+      \(Positive val) ->
+        let value = Satoshi
+              (fromIntegral (val :: Int) + 100000)
+            fee = B5.spending_fee (FeeratePerKw 253)
+              (B5.to_local_penalty_input_weight
+               + B5.penalty_tx_base_weight)
+        in case B5.spend_to_local
+                  dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey
+                  dummyDestScript (FeeratePerKw 253) of
+             Nothing -> False
+             Just stx ->
+               let tx = B5.stx_tx stx
+                   outVal = txout_value
+                     (head' (tx_outputs tx))
+               in outVal + unSatoshi fee ==
+                  unSatoshi value
+
+  , testProperty "fee monotonic in feerate" $
+      \(Positive r1) (Positive r2) ->
+        let rate1 = fromIntegral (r1 :: Int)
+            rate2 = fromIntegral (r2 :: Int)
+            w = B5.to_local_penalty_input_weight
+              + B5.penalty_tx_base_weight
+            fee1 = B5.spending_fee
+              (FeeratePerKw rate1) w
+            fee2 = B5.spending_fee
+              (FeeratePerKw rate2) w
+        in if rate1 <= rate2
+           then unSatoshi fee1 <= unSatoshi fee2
+           else unSatoshi fee1 >= unSatoshi fee2
+
+  , testProperty "classify preserves output count" $
+      \(NonNegative n') ->
+        let n = min (n' :: Int) 10
+            outputs =
+              [ TxOutput (Satoshi 50000) toLocalScript
+                  OutputToLocal
+              | _ <- [1..n] ]
+            commitTx = CommitmentTx
+              { ctx_version = 2
+              , ctx_locktime = Locktime 0
+              , ctx_input_outpoint = dummyOutPoint
+              , ctx_input_sequence = Sequence 0
+              , ctx_outputs = outputs
+              , ctx_funding_script = dummyDestScript
+              }
+            outs = B5.classify_local_commit_outputs
+              commitTx dummyKeys dummyDelay
+              dummyFeatures []
+        in length outs == n
+
+  , testProperty "spend_to_local always version 2" $
+      \(Positive val) ->
+        let value = Satoshi
+              (fromIntegral (val :: Int) + 100000)
+        in case B5.spend_to_local
+                  dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey
+                  dummyDestScript (FeeratePerKw 253) of
+             Nothing -> False
+             Just stx ->
+               tx_version (B5.stx_tx stx) == 2
+
+  , testProperty "revoked nSequence is 0xFFFFFFFF" $
+      \(Positive val) ->
+        let value = Satoshi
+              (fromIntegral (val :: Int) + 100000)
+        in case B5.spend_revoked_to_local
+                  dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey
+                  dummyDestScript (FeeratePerKw 253) of
+             Nothing -> False
+             Just stx ->
+               let inp = head'
+                     (tx_inputs (B5.stx_tx stx))
+               in txin_sequence inp == 0xFFFFFFFF
   ]
 
 -- helpers ------------------------------------------------------------
