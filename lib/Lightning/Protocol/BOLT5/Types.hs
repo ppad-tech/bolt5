@@ -18,11 +18,19 @@ module Lightning.Protocol.BOLT5.Types (
   , UnresolvedOutput(..)
   , OutputResolution(..)
 
+    -- * HTLC output type
+  , HTLCOutputType(..)
+  , htlcOutputType
+  , htlcOutputTypeWeight
+
     -- * Spending transactions
   , SpendingTx(..)
 
     -- * Penalty batching
+  , RevokedOutput(..)
+  , RevokedOutputType(..)
   , PenaltyContext(..)
+  , revoked_output_weight
 
     -- * Weight constants (Appendix A)
   , to_local_penalty_witness_weight
@@ -96,11 +104,49 @@ data OutputResolution
     --   remote offer).
   | Revoke !RevocationPubkey
     -- ^ Spend revoked to_local with revocation key.
-  | RevokeHTLC !RevocationPubkey !OutputType
+  | RevokeHTLC !RevocationPubkey !HTLCOutputType
     -- ^ Spend revoked HTLC output with revocation key.
   | AnchorSpend !FundingPubkey
     -- ^ Spend anchor output.
   deriving (Eq, Show, Generic)
+
+-- HTLC output type -------------------------------------------------
+
+-- | Type of HTLC output, restricted to only HTLC variants.
+--
+-- Unlike bolt3's 'OutputType' which includes all six output
+-- types, this ADT makes it impossible to confuse HTLC outputs
+-- with to_local, to_remote, or anchor outputs.
+data HTLCOutputType
+  = HTLCOfferedOutput {-# UNPACK #-} !CltvExpiry
+    -- ^ Offered HTLC output with CLTV expiry.
+  | HTLCReceivedOutput {-# UNPACK #-} !CltvExpiry
+    -- ^ Received HTLC output with CLTV expiry.
+  deriving (Eq, Show, Generic)
+
+-- | Extract an 'HTLCOutputType' from a bolt3 'OutputType'.
+--
+-- Returns 'Nothing' for non-HTLC output types.
+--
+-- >>> htlcOutputType (OutputOfferedHTLC (CltvExpiry 500))
+-- Just (HTLCOfferedOutput (CltvExpiry ...))
+-- >>> htlcOutputType OutputToLocal
+-- Nothing
+htlcOutputType :: OutputType -> Maybe HTLCOutputType
+htlcOutputType (OutputOfferedHTLC e) =
+  Just (HTLCOfferedOutput e)
+htlcOutputType (OutputReceivedHTLC e) =
+  Just (HTLCReceivedOutput e)
+htlcOutputType _ = Nothing
+{-# INLINE htlcOutputType #-}
+
+-- | Penalty input weight for an HTLC output type.
+htlcOutputTypeWeight :: HTLCOutputType -> Word64
+htlcOutputTypeWeight (HTLCOfferedOutput _) =
+  offered_htlc_penalty_input_weight
+htlcOutputTypeWeight (HTLCReceivedOutput _) =
+  accepted_htlc_penalty_input_weight
+{-# INLINE htlcOutputTypeWeight #-}
 
 -- spending transactions ----------------------------------------------
 
@@ -121,9 +167,38 @@ data SpendingTx = SpendingTx
 
 -- penalty batching ---------------------------------------------------
 
+-- | A revoked output that can be swept with a revocation key.
+--
+-- This type restricts penalty transaction inputs to only
+-- valid revocation targets: to_local outputs and HTLC outputs.
+-- Other output types (to_remote, anchors) cannot appear in
+-- penalty transactions.
+data RevokedOutput = RevokedOutput
+  { ro_outpoint :: !OutPoint
+  , ro_value    :: {-# UNPACK #-} !Satoshi
+  , ro_type     :: !RevokedOutputType
+  } deriving (Eq, Show, Generic)
+
+-- | What kind of revoked output is being swept.
+data RevokedOutputType
+  = RevokedToLocal
+    -- ^ Revoked to_local output.
+  | RevokedHTLC !HTLCOutputType
+    -- ^ Revoked HTLC output.
+  deriving (Eq, Show, Generic)
+
+-- | Penalty input weight for a revoked output.
+revoked_output_weight :: RevokedOutput -> Word64
+revoked_output_weight !ro = case ro_type ro of
+  RevokedToLocal ->
+    to_local_penalty_input_weight
+  RevokedHTLC !htype ->
+    htlcOutputTypeWeight htype
+{-# INLINE revoked_output_weight #-}
+
 -- | Context for constructing batched penalty transactions.
 data PenaltyContext = PenaltyContext
-  { pc_outputs        :: !(NonEmpty UnresolvedOutput)
+  { pc_outputs        :: !(NonEmpty RevokedOutput)
     -- ^ Revoked outputs to sweep (must be non-empty).
   , pc_revocation_key :: !RevocationPubkey
     -- ^ Revocation pubkey for all outputs.

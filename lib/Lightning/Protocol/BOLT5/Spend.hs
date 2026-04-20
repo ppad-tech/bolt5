@@ -306,14 +306,14 @@ spend_revoked_to_local !op !value !revpk !delay
 -- 'received_htlc_witness_revoke' from bolt3, depending on
 -- the output type.
 --
--- Returns 'Nothing' if the output type is not an HTLC, or
--- if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output
+-- value.
 spend_revoked_htlc
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
   -> Satoshi
   -- ^ Value of the HTLC output.
-  -> OutputType
+  -> HTLCOutputType
   -- ^ Whether offered or received HTLC.
   -> RevocationPubkey
   -> CommitmentKeys
@@ -323,10 +323,10 @@ spend_revoked_htlc
   -- ^ Destination scriptPubKey.
   -> FeeratePerKw
   -> Maybe SpendingTx
-spend_revoked_htlc !op !value !otype !revpk !keys
+spend_revoked_htlc !op !value !htype !revpk !keys
     !features !ph !destScript !feerate =
-  case otype of
-    OutputOfferedHTLC _ ->
+  case htype of
+    HTLCOfferedOutput _ ->
       let !witnessScript = offered_htlc_script
             revpk
             (ck_remote_htlc keys)
@@ -346,7 +346,7 @@ spend_revoked_htlc !op !value !otype !revpk !keys
                        destScript outputValue 0
            in Just (SpendingTx tx witnessScript value
                       SIGHASH_ALL)
-    OutputReceivedHTLC expiry ->
+    HTLCReceivedOutput expiry ->
       let !witnessScript = received_htlc_script
             revpk
             (ck_remote_htlc keys)
@@ -367,7 +367,6 @@ spend_revoked_htlc !op !value !otype !revpk !keys
                        destScript outputValue 0
            in Just (SpendingTx tx witnessScript value
                       SIGHASH_ALL)
-    _ -> Nothing
 
 -- | Spend a revoked second-stage HTLC output (HTLC-timeout or
 --   HTLC-success output) using the revocation key.
@@ -413,8 +412,9 @@ spend_revoked_htlc_output !op !value !revpk !delay
 -- be resolved in a single penalty transaction (within the
 -- 400,000 weight limit). The caller signs each input with the
 -- revocation privkey.
--- | Returns 'Nothing' if the total fee would exceed the
---   total input value.
+--
+-- Returns 'Nothing' if the total fee would exceed the total
+-- input value.
 spend_revoked_batch :: PenaltyContext -> Maybe SpendingTx
 spend_revoked_batch !ctx =
   let !outs = pc_outputs ctx
@@ -455,22 +455,16 @@ spend_revoked_batch !ctx =
                   SIGHASH_ALL)
   where
     go !totalVal !totalWt [] = (totalVal, totalWt)
-    go !totalVal !totalWt (uo:rest) =
-      let !w = case uo_type uo of
-            Revoke _ ->
-              to_local_penalty_input_weight
-            RevokeHTLC _ (OutputOfferedHTLC _) ->
-              offered_htlc_penalty_input_weight
-            RevokeHTLC _ (OutputReceivedHTLC _) ->
-              accepted_htlc_penalty_input_weight
-            _ -> 0
+    go !totalVal !totalWt (ro:rest) =
+      let !w = revoked_output_weight ro
           !v = Satoshi
-            (unSatoshi totalVal + unSatoshi (uo_value uo))
+            (unSatoshi totalVal
+             + unSatoshi (ro_value ro))
       in go v (totalWt + w) rest
 
-    mkPenaltyInput !uo =
+    mkPenaltyInput !ro =
       TxIn
-        { txin_prevout = uo_outpoint uo
+        { txin_prevout = ro_outpoint ro
         , txin_script_sig = BS.empty
         , txin_sequence = 0xFFFFFFFF
         }

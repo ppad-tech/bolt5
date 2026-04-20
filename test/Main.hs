@@ -240,8 +240,8 @@ detect_tests = testGroup "Detect" [
           preimage = dummyPreimage
           wit = Witness [sig, preimage]
       case B5.extract_preimage_offered wit of
-        Just (PaymentPreimage bs) ->
-          bs @?= preimage
+        Just pp ->
+          unPaymentPreimage pp @?= preimage
         Nothing ->
           assertFailure "expected preimage"
 
@@ -263,8 +263,8 @@ detect_tests = testGroup "Detect" [
           preimage = dummyPreimage
           wit = Witness [zero, remoteSig, localSig, preimage]
       case B5.extract_preimage_htlc_success wit of
-        Just (PaymentPreimage bs) ->
-          bs @?= preimage
+        Just pp ->
+          unPaymentPreimage pp @?= preimage
         Nothing ->
           assertFailure "expected preimage"
 
@@ -415,13 +415,13 @@ classify_tests = testGroup "Classify" [
             @?= B5.Revoke dummyRevocationPubkey
           B5.uo_type o2 @?= B5.Resolved
           case B5.uo_type o3 of
-            B5.RevokeHTLC _ (OutputOfferedHTLC _) ->
+            B5.RevokeHTLC _ (B5.HTLCOfferedOutput _) ->
               pure ()
             other -> assertFailure $
               "expected RevokeHTLC offered, got "
               <> show other
           case B5.uo_type o4 of
-            B5.RevokeHTLC _ (OutputReceivedHTLC _) ->
+            B5.RevokeHTLC _ (B5.HTLCReceivedOutput _) ->
               pure ()
             other -> assertFailure $
               "expected RevokeHTLC received, got "
@@ -600,12 +600,12 @@ spend_tests = testGroup "Spend" [
   , testCase "spend_revoked_batch total value" $ do
       let op1 = OutPoint dummyTxId 0
           op2 = OutPoint dummyTxId 1
-          uo1 = B5.UnresolvedOutput op1 (Satoshi 50000)
-            (B5.Revoke dummyRevocationPubkey)
-          uo2 = B5.UnresolvedOutput op2 (Satoshi 30000)
-            (B5.Revoke dummyRevocationPubkey)
+          ro1 = B5.RevokedOutput op1 (Satoshi 50000)
+            B5.RevokedToLocal
+          ro2 = B5.RevokedOutput op2 (Satoshi 30000)
+            B5.RevokedToLocal
           pctx = B5.PenaltyContext
-            { B5.pc_outputs = uo1 :| [uo2]
+            { B5.pc_outputs = ro1 :| [ro2]
             , B5.pc_revocation_key =
                 dummyRevocationPubkey
             , B5.pc_destination = dummyDestScript
@@ -623,11 +623,11 @@ spend_tests = testGroup "Spend" [
       length (tx_inputs tx) @?= 2
 
   , testCase "spend_revoked_batch single element" $ do
-      let uo = B5.UnresolvedOutput
+      let ro = B5.RevokedOutput
             dummyOutPoint (Satoshi 50000)
-            (B5.Revoke dummyRevocationPubkey)
+            B5.RevokedToLocal
           pctx = B5.PenaltyContext
-            { B5.pc_outputs = uo :| []
+            { B5.pc_outputs = ro :| []
             , B5.pc_revocation_key =
                 dummyRevocationPubkey
             , B5.pc_destination = dummyDestScript
@@ -643,19 +643,21 @@ spend_tests = testGroup "Spend" [
       let op1 = OutPoint dummyTxId 0
           op2 = OutPoint dummyTxId 1
           op3 = OutPoint dummyTxId 2
-          uo1 = B5.UnresolvedOutput op1
+          ro1 = B5.RevokedOutput op1
             (Satoshi 50000)
-            (B5.Revoke dummyRevocationPubkey)
-          uo2 = B5.UnresolvedOutput op2
+            B5.RevokedToLocal
+          ro2 = B5.RevokedOutput op2
             (Satoshi 10000)
-            (B5.RevokeHTLC dummyRevocationPubkey
-              (OutputOfferedHTLC (CltvExpiry 500000)))
-          uo3 = B5.UnresolvedOutput op3
+            (B5.RevokedHTLC
+              (B5.HTLCOfferedOutput
+                (CltvExpiry 500000)))
+          ro3 = B5.RevokedOutput op3
             (Satoshi 10000)
-            (B5.RevokeHTLC dummyRevocationPubkey
-              (OutputReceivedHTLC (CltvExpiry 500000)))
+            (B5.RevokedHTLC
+              (B5.HTLCReceivedOutput
+                (CltvExpiry 500000)))
           pctx = B5.PenaltyContext
-            { B5.pc_outputs = uo1 :| [uo2, uo3]
+            { B5.pc_outputs = ro1 :| [ro2, ro3]
             , B5.pc_revocation_key =
                 dummyRevocationPubkey
             , B5.pc_destination = dummyDestScript
@@ -675,11 +677,11 @@ spend_tests = testGroup "Spend" [
       @?= Nothing
 
   , testCase "spend_revoked_batch fee underflow" $ do
-      let uo = B5.UnresolvedOutput
+      let ro = B5.RevokedOutput
             dummyOutPoint (Satoshi 1)
-            (B5.Revoke dummyRevocationPubkey)
+            B5.RevokedToLocal
           pctx = B5.PenaltyContext
-            { B5.pc_outputs = uo :| []
+            { B5.pc_outputs = ro :| []
             , B5.pc_revocation_key =
                 dummyRevocationPubkey
             , B5.pc_destination = dummyDestScript
@@ -810,7 +812,7 @@ revoked_htlc_spend_tests = testGroup "Revoked HTLC Spend" [
     testCase "spend_revoked_htlc - offered" $ do
       case B5.spend_revoked_htlc
             dummyOutPoint (Satoshi 50000)
-            (OutputOfferedHTLC (CltvExpiry 500000))
+            (B5.HTLCOfferedOutput (CltvExpiry 500000))
             dummyRevocationPubkey dummyKeys
             dummyFeatures dummyPaymentHash
             dummyDestScript dummyFeerate of
@@ -825,7 +827,8 @@ revoked_htlc_spend_tests = testGroup "Revoked HTLC Spend" [
   , testCase "spend_revoked_htlc - received" $ do
       case B5.spend_revoked_htlc
             dummyOutPoint (Satoshi 50000)
-            (OutputReceivedHTLC (CltvExpiry 500000))
+            (B5.HTLCReceivedOutput
+              (CltvExpiry 500000))
             dummyRevocationPubkey dummyKeys
             dummyFeatures dummyPaymentHash
             dummyDestScript dummyFeerate of
@@ -838,14 +841,20 @@ revoked_htlc_spend_tests = testGroup "Revoked HTLC Spend" [
           assertBool "output < input"
             (outVal < 50000)
 
-  , testCase "spend_revoked_htlc - invalid type" $ do
-      B5.spend_revoked_htlc
-        dummyOutPoint (Satoshi 50000)
-        OutputToLocal
-        dummyRevocationPubkey dummyKeys
-        dummyFeatures dummyPaymentHash
-        dummyDestScript dummyFeerate
-      @?= Nothing
+  , testCase "htlcOutputType - valid HTLC types" $ do
+      B5.htlcOutputType
+        (OutputOfferedHTLC (CltvExpiry 500))
+        @?= Just (B5.HTLCOfferedOutput (CltvExpiry 500))
+      B5.htlcOutputType
+        (OutputReceivedHTLC (CltvExpiry 600))
+        @?= Just (B5.HTLCReceivedOutput
+                    (CltvExpiry 600))
+
+  , testCase "htlcOutputType - non-HTLC types" $ do
+      B5.htlcOutputType OutputToLocal @?= Nothing
+      B5.htlcOutputType OutputToRemote @?= Nothing
+      B5.htlcOutputType OutputLocalAnchor @?= Nothing
+      B5.htlcOutputType OutputRemoteAnchor @?= Nothing
 
   , testCase "spend_revoked_htlc_output structure" $ do
       stx <- assertJust "spend_revoked_htlc_output" $
