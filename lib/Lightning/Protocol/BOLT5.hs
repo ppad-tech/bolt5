@@ -52,11 +52,19 @@ module Lightning.Protocol.BOLT5 (
   , UnresolvedOutput(..)
   , OutputResolution(..)
 
+    -- ** HTLC output type
+  , HTLCOutputType(..)
+  , htlcOutputType
+  , htlcOutputTypeWeight
+
     -- ** Spending transactions
   , SpendingTx(..)
 
     -- ** Penalty batching
+  , RevokedOutput(..)
+  , RevokedOutputType(..)
   , PenaltyContext(..)
+  , revoked_output_weight
 
     -- * Weight constants (Appendix A)
   , to_local_penalty_witness_weight

@@ -251,10 +251,10 @@ classifyRevokedOutput !txid !revpk !idx !out =
           Resolved  -- Can be swept by anyone after 16 blocks
         OutputRemoteAnchor ->
           Resolved  -- Our anchor
-        otype@(OutputOfferedHTLC _) ->
-          RevokeHTLC revpk otype
-        otype@(OutputReceivedHTLC _) ->
-          RevokeHTLC revpk otype
+        OutputOfferedHTLC expiry ->
+          RevokeHTLC revpk (HTLCOfferedOutput expiry)
+        OutputReceivedHTLC expiry ->
+          RevokeHTLC revpk (HTLCReceivedOutput expiry)
   in UnresolvedOutput op val resolution
 
 -- preimage extraction ------------------------------------------------

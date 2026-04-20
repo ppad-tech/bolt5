@@ -26,6 +26,7 @@ library
   exposed-modules:
       Lightning.Protocol.BOLT5
       Lightning.Protocol.BOLT5.Detect
+      Lightning.Protocol.BOLT5.Internal
       Lightning.Protocol.BOLT5.Spend
       Lightning.Protocol.BOLT5.Types
   build-depends:

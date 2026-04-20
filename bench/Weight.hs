@@ -43,6 +43,9 @@ instance NFData FeeratePerKw where
 instance NFData ToSelfDelay where
   rnf (ToSelfDelay x) = rnf x
 
+instance NFData CltvExpiry where
+  rnf (CltvExpiry x) = rnf x
+
 instance NFData SighashType
 
 instance NFData B5.OutputResolution where
@@ -50,8 +53,20 @@ instance NFData B5.OutputResolution where
   rnf (B5.Revoke rk) = rnf rk
   rnf _ = ()
 
+instance NFData B5.HTLCOutputType where
+  rnf (B5.HTLCOfferedOutput e) = rnf e
+  rnf (B5.HTLCReceivedOutput e) = rnf e
+
 instance NFData B5.UnresolvedOutput where
   rnf (B5.UnresolvedOutput op v t) =
+    rnf op `seq` rnf v `seq` rnf t
+
+instance NFData B5.RevokedOutputType where
+  rnf B5.RevokedToLocal = ()
+  rnf (B5.RevokedHTLC h) = rnf h
+
+instance NFData B5.RevokedOutput where
+  rnf (B5.RevokedOutput op v t) =
     rnf op `seq` rnf v `seq` rnf t
 
 instance NFData B5.SpendingTx where
@@ -102,13 +117,13 @@ dummyFeerate = FeeratePerKw 253
 dummyDelay :: ToSelfDelay
 dummyDelay = ToSelfDelay 144
 
-mkRevokedOutputs :: Int -> NE.NonEmpty B5.UnresolvedOutput
+mkRevokedOutputs :: Int -> NE.NonEmpty B5.RevokedOutput
 mkRevokedOutputs n =
-  let uo i = B5.UnresolvedOutput
+  let ro i = B5.RevokedOutput
         (OutPoint dummyTxId (fromIntegral i))
         (Satoshi 10000)
-        (B5.Revoke dummyRevPk)
-  in  uo 0 NE.:| [ uo i | i <- [1..n-1] ]
+        B5.RevokedToLocal
+  in  ro 0 NE.:| [ ro i | i <- [1..n-1] ]
 
 -- weights ------------------------------------------------------------
 
