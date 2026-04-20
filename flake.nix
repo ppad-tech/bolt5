@@ -78,6 +78,10 @@
             [ llvm clang ];
 
         tx = ppad-tx.packages.${system}.default;
+        tx-llvm =
+          hlib.addBuildTools
+            (hlib.enableCabalFlag tx "llvm")
+            [ llvm clang ];
 
         bolt3 = ppad-bolt3.packages.${system}.default;
 
@@ -85,7 +89,7 @@
           ppad-sha256 = sha256-llvm;
           ppad-secp256k1 = secp256k1-llvm;
           ppad-ripemd160 = ripemd160-llvm;
-          ppad-tx = tx;
+          ppad-tx = tx-llvm;
           ppad-bolt3 = bolt3;
           ${lib} = new.callCabal2nix lib ./. { };
         });
