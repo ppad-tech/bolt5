@@ -1023,6 +1023,72 @@ property_tests = testGroup "Properties" [
                let inp = head'
                      (tx_inputs (B5.stx_tx stx))
                in txin_sequence inp == 0xFFFFFFFF
+
+  , testProperty "htlcOutputType preserves expiry" $
+      \expiry ->
+        let ce = CltvExpiry expiry
+        in  B5.htlcOutputType (OutputOfferedHTLC ce)
+            == Just (B5.HTLCOfferedOutput ce)
+            &&
+            B5.htlcOutputType (OutputReceivedHTLC ce)
+            == Just (B5.HTLCReceivedOutput ce)
+
+  , testProperty "htlcOutputType rejects non-HTLC" $
+      property $
+        B5.htlcOutputType OutputToLocal == Nothing
+        && B5.htlcOutputType OutputToRemote == Nothing
+        && B5.htlcOutputType OutputLocalAnchor == Nothing
+        && B5.htlcOutputType OutputRemoteAnchor
+           == Nothing
+
+  , testProperty "revoked_output_weight by type" $
+      \expiry ->
+        let ce = CltvExpiry expiry
+            roLocal = B5.RevokedOutput
+              dummyOutPoint (Satoshi 1000)
+              B5.RevokedToLocal
+            roOffered = B5.RevokedOutput
+              dummyOutPoint (Satoshi 1000)
+              (B5.RevokedHTLC
+                (B5.HTLCOfferedOutput ce))
+            roReceived = B5.RevokedOutput
+              dummyOutPoint (Satoshi 1000)
+              (B5.RevokedHTLC
+                (B5.HTLCReceivedOutput ce))
+        in  B5.revoked_output_weight roLocal
+            == B5.to_local_penalty_input_weight
+            &&
+            B5.revoked_output_weight roOffered
+            == B5.offered_htlc_penalty_input_weight
+            &&
+            B5.revoked_output_weight roReceived
+            == B5.accepted_htlc_penalty_input_weight
+
+  , testProperty "spend_revoked_batch input count" $
+      \(Positive n') ->
+        let n = min (n' :: Int) 5
+            ros = [ B5.RevokedOutput
+                      (OutPoint dummyTxId
+                        (fromIntegral i))
+                      (Satoshi 1000000)
+                      B5.RevokedToLocal
+                  | i <- [0..n-1] ]
+        in case ros of
+          [] -> True  -- impossible with Positive
+          (r:rs) ->
+            let pctx = B5.PenaltyContext
+                  { B5.pc_outputs = r :| rs
+                  , B5.pc_revocation_key =
+                      dummyRevocationPubkey
+                  , B5.pc_destination =
+                      dummyDestScript
+                  , B5.pc_feerate = FeeratePerKw 253
+                  }
+            in case B5.spend_revoked_batch pctx of
+              Nothing -> False
+              Just stx ->
+                length (tx_inputs (B5.stx_tx stx))
+                == n
   ]
 
 -- helpers ------------------------------------------------------------
