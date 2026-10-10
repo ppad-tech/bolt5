@@ -4,13 +4,19 @@ Haskell implementation of BOLT #5 (Lightning Network on-chain transaction
 handling).
 
 Specification: https://github.com/lightning/bolts/blob/master/05-onchain.md
+(tracked as of lightning/bolts@1aadb719; copy in `etc/05-onchain.md`).
+
+The library's scope is being redesigned and it is not yet ready for
+release; see the README for what it does and doesn't cover.
 
 ## Project Structure
 
-- `lib/` - library source (Lightning.Protocol.BOLT5)
-- `test/` - tests (tasty + tasty-hunit)
+- `lib/` - library source (public API: Lightning.Protocol.BOLT5;
+  submodules are internal)
+- `test/` - tests (tasty, tasty-hunit, tasty-quickcheck), public API only;
+  BOLT #3 Appendix C/F vectors inline
 - `bench/` - benchmarks (criterion for timing, weigh for allocations)
-- `etc/` - reference materials (BOLT spec)
+- `etc/` - reference materials (BOLT spec, pinned upstream commit)
 - `flake.nix` - nix flake for dependency and build management
 - `ppad-bolt5.cabal` - cabal package definition
 - `CLAUDE.md` / `AGENTS.md` - keep these in sync
@@ -44,6 +50,8 @@ Use only minimal external dependencies. Prefer GHC's core/boot libraries
 - ppad-* libraries
 - Test dependencies (tasty, QuickCheck, etc. for test-suite only)
 - Benchmark dependencies (criterion, weigh for benchmark only)
+
+Current dependencies: ppad-bolt1, ppad-bolt3, ppad-sha256, ppad-tx.
 
 ## Code Style
 
@@ -140,5 +148,4 @@ When planning work:
 The flake.nix follows ppad conventions:
 - Uses ppad-nixpkgs as base
 - Follows references to avoid duplication
-- Supports LLVM backend via cabal flag
 - Provides devShell with ghc, cabal, cc, llvm
