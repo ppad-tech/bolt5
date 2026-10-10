@@ -162,7 +162,7 @@ data SpendingTx = SpendingTx
   , stx_input_value  :: {-# UNPACK #-} !Satoshi
     -- ^ Value of the input being spent (for sighash).
   , stx_sighash_type :: !SighashType
-    -- ^ Sighash type to use when signing.
+    -- ^ Sighash type for the local signature.
   } deriving (Eq, Show, Generic)
 
 -- penalty batching ---------------------------------------------------

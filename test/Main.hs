@@ -4,7 +4,7 @@
 module Main where
 
 import Bitcoin.Prim.Tx (TxOut(..), from_base16)
-import Bitcoin.Prim.Tx.Sighash (SighashType(..))
+import Bitcoin.Prim.Tx.Sighash (SighashType(..), encode_sighash)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
@@ -224,8 +224,14 @@ vecHtlc dir msat expiry b = HTLC
   , htlc_cltv_expiry = CltvExpiry expiry
   }
 
-vecHtlc1, vecHtlc5, vecHtlc6 :: HTLC
+vecHtlc0, vecHtlc1, vecHtlc2, vecHtlc3, vecHtlc4 :: HTLC
+vecHtlc0 = vecHtlc HTLCReceived 1000000 500 0x00
 vecHtlc1 = vecHtlc HTLCReceived 2000000 501 0x01
+vecHtlc2 = vecHtlc HTLCOffered 2000000 502 0x02
+vecHtlc3 = vecHtlc HTLCOffered 3000000 503 0x03
+vecHtlc4 = vecHtlc HTLCReceived 4000000 504 0x04
+
+vecHtlc5, vecHtlc6 :: HTLC
 vecHtlc5 = vecHtlc HTLCOffered 5000000 506 0x05
 vecHtlc6 = vecHtlc HTLCOffered 5000001 505 0x05
 
@@ -299,6 +305,13 @@ vecCommitSameHash = vecCommitment (FeeratePerKw 253)
   (ChannelFeatures False) (MilliSatoshi 6987999999)
   [vecHtlc1, vecHtlc5, vecHtlc6]
 
+-- | The Appendix F (anchors) "commitment tx with seven outputs
+--   untrimmed".
+vecCommitAnchors :: Maybe CommitmentTx
+vecCommitAnchors = vecCommitment (FeeratePerKw 644)
+  (ChannelFeatures True) (MilliSatoshi 6988000000)
+  [vecHtlc0, vecHtlc1, vecHtlc2, vecHtlc3, vecHtlc4]
+
 -- | Appendix C: commitment tx with 3 htlc outputs, 2 offered
 --   having the same amount and preimage (signed).
 vecCCommitSameHash :: BS.ByteString
@@ -371,6 +384,23 @@ vecCHtlcTimeout5 =
   \8d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a9142002cc\
   \93ebefbb1b73f0af055dcc27a0b504ad7688ac6868fa010000"
 
+-- | Appendix F: HTLC-timeout tx for htlc #2 from "commitment tx
+--   with seven outputs untrimmed" (signed).
+vecFHtlcTimeout2 :: BS.ByteString
+vecFHtlcTimeout2 =
+  "02000000000101b8cefef62ea66f5178b9361b2371be0759cbc8c689bcfa7a8e\
+  \6746d497ec221a03000000000100000001d0070000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004830\
+  \45022100a847bc3b8cf2441013725ae32dc589c419835d069afd6d7f3d9834d8\
+  \be7cea6e02204ce9d35ec7f0788da80e4d62e810c4ccd13617e58fa10832e38f\
+  \b7ae87bdf33883473044022026739b1adbfa34c485bf0e5a19e0cf7532f64545\
+  \bcc5c95b95643ccc2d351e1902201743bb1b34f00e031cc15f6eff0f8ab76450\
+  \8d2681ff965ba62e76e540bca1e801008876a91414011f7254d96b819c76986c\
+  \277d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a21\
+  \84d88256816826d6231c068d4a5b7c820120876475527c21030d417a46946384\
+  \f88d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a914b43e\
+  \1b38138a41b37f7cd9a1d274bc63e3a9b5d188ac6851b27568f6010000"
+
 -- | Appendix F: HTLC-success tx for htlc #1 from "commitment tx
 --   with seven outputs untrimmed" (signed).
 vecFHtlcSuccess1 :: BS.ByteString
@@ -440,6 +470,22 @@ assertHtlcTx stx vec = do
   case reverse items of
     script : _ -> B5.stx_input_script stx @?= Script script
     [] -> assertFailure "empty witness"
+
+-- | Check the sighash flags of the signatures in a signed BOLT #3
+--   HTLC-tx vector: the local one must be the type the 'SpendingTx'
+--   gives, the remote one the given type.
+assertSighashFlags
+  :: B5.SpendingTx -> SighashType -> BS.ByteString -> Assertion
+assertSighashFlags stx remoteType vec = do
+  items <- singleWitness =<< parseTx vec
+  case items of
+    [_, remoteSig, localSig, _, _] -> do
+      flag remoteSig @?= Just (encode_sighash remoteType)
+      flag localSig
+        @?= Just (encode_sighash (B5.stx_sighash_type stx))
+    _ -> assertFailure "unexpected HTLC-tx witness"
+  where
+    flag = fmap (fromIntegral . snd) . BS.unsnoc
 
 -- types tests --------------------------------------------------------
 
@@ -781,6 +827,7 @@ classify_tests = testGroup "Classify" [
           assertHtlcTx stx0 vecCHtlcSuccess1
           stx1 <- vecHtlcTx (FeeratePerKw 253) o1
           assertHtlcTx stx1 vecCHtlcTimeout6
+          assertSighashFlags stx1 SIGHASH_ALL vecCHtlcTimeout6
           stx2 <- vecHtlcTx (FeeratePerKw 253) o2
           assertHtlcTx stx2 vecCHtlcTimeout5
         _ -> assertFailure "expected at least 3 outputs"
@@ -1047,8 +1094,7 @@ htlc_spend_tests = testGroup "HTLC Spend" [
       let ctx = dummyHTLCContext
             { hc_features = dummyFeaturesAnchors }
           stx = B5.spend_htlc_timeout ctx dummyKeys
-      B5.stx_sighash_type stx
-        @?= SIGHASH_SINGLE_ANYONECANPAY
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
 
   , testCase "spend_htlc_success anchors sighash" $ do
       let ctx = dummyHTLCContext
@@ -1056,8 +1102,26 @@ htlc_spend_tests = testGroup "HTLC Spend" [
             , hc_features = dummyFeaturesAnchors
             }
           stx = B5.spend_htlc_success ctx dummyKeys
-      B5.stx_sighash_type stx
-        @?= SIGHASH_SINGLE_ANYONECANPAY
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+
+  , testCase "HTLC txs - Appendix F (anchors)" $ do
+      -- The local signature uses SIGHASH_ALL and the remote one
+      -- SIGHASH_SINGLE|SIGHASH_ANYONECANPAY.
+      commit <- assertJust "commitment" vecCommitAnchors
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) (ChannelFeatures True)
+            [vecHtlc0, vecHtlc1, vecHtlc2, vecHtlc3, vecHtlc4]
+          check uo vec = do
+            stx <- vecHtlcTx (FeeratePerKw 644) uo
+            assertHtlcTx stx vec
+            B5.stx_sighash_type stx @?= SIGHASH_ALL
+            assertSighashFlags stx SIGHASH_SINGLE_ANYONECANPAY vec
+      case drop 3 outs of
+        o3 : o4 : _ -> do
+          check o3 vecFHtlcTimeout2
+          check o4 vecFHtlcSuccess1
+        _ -> assertFailure "expected at least 5 outputs"
   ]
 
 -- remote spend tests -------------------------------------------------

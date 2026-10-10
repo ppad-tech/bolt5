@@ -94,6 +94,11 @@ spend_to_local !op !value !revpk !delay !delayedpk
 -- has timed out. The bolt3 'build_htlc_timeout_tx' function
 -- constructs the HTLC-timeout tx; this wraps it as a
 -- 'SpendingTx' with the witness script and sighash metadata.
+--
+-- The sighash type is for the local signature, which is always
+-- @SIGHASH_ALL@. With @option_anchors@ the remote's
+-- @htlc_signature@ instead uses
+-- @SIGHASH_SINGLE|SIGHASH_ANYONECANPAY@.
 spend_htlc_timeout
   :: HTLCContext
   -> CommitmentKeys
@@ -111,11 +116,8 @@ spend_htlc_timeout !ctx !keys =
         features
       !inputValue =
         msatToSat (htlc_amount_msat htlc)
-      !sighashType = if has_anchors features
-        then SIGHASH_SINGLE_ANYONECANPAY
-        else SIGHASH_ALL
       !tx = htlc_tx_to_tx htlcTx
-  in SpendingTx tx witnessScript inputValue sighashType
+  in SpendingTx tx witnessScript inputValue SIGHASH_ALL
 
 -- | Construct an HTLC-success second-stage transaction.
 --
@@ -123,6 +125,11 @@ spend_htlc_timeout !ctx !keys =
 -- have the preimage. The bolt3 'build_htlc_success_tx' function
 -- constructs the HTLC-success tx; this wraps it as a
 -- 'SpendingTx'.
+--
+-- The sighash type is for the local signature, which is always
+-- @SIGHASH_ALL@. With @option_anchors@ the remote's
+-- @htlc_signature@ instead uses
+-- @SIGHASH_SINGLE|SIGHASH_ANYONECANPAY@.
 spend_htlc_success
   :: HTLCContext
   -> CommitmentKeys
@@ -141,11 +148,8 @@ spend_htlc_success !ctx !keys =
         features
       !inputValue =
         msatToSat (htlc_amount_msat htlc)
-      !sighashType = if has_anchors features
-        then SIGHASH_SINGLE_ANYONECANPAY
-        else SIGHASH_ALL
       !tx = htlc_tx_to_tx htlcTx
-  in SpendingTx tx witnessScript inputValue sighashType
+  in SpendingTx tx witnessScript inputValue SIGHASH_ALL
 
 -- | Spend a second-stage HTLC output (HTLC-timeout or
 --   HTLC-success output) after the CSV delay.
