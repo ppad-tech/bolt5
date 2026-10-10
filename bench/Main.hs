@@ -15,20 +15,11 @@ import qualified Lightning.Protocol.BOLT5 as B5
 
 -- NFData orphan instances for criterion -----------------------------
 
-instance NFData Satoshi where
-  rnf (Satoshi x) = rnf x
-
-instance NFData MilliSatoshi where
-  rnf (MilliSatoshi x) = rnf x
-
 instance NFData Script where
   rnf (Script bs) = rnf bs
 
 instance NFData Pubkey where
-  rnf (Pubkey x) = rnf x
-
-instance NFData Point where
-  rnf (Point x) = rnf x
+  rnf pk = rnf (unPubkey pk)
 
 instance NFData RevocationPubkey where
   rnf (RevocationPubkey x) = rnf x
@@ -44,9 +35,6 @@ instance NFData FeeratePerKw where
 
 instance NFData ToSelfDelay where
   rnf (ToSelfDelay x) = rnf x
-
-instance NFData PaymentHash where
-  rnf (PaymentHash x) = rnf x
 
 instance NFData CltvExpiry where
   rnf (CltvExpiry x) = rnf x

@@ -16,17 +16,11 @@ import Weigh
 
 -- NFData orphan instances for weigh ---------------------------------
 
-instance NFData Satoshi where
-  rnf (Satoshi x) = rnf x
-
 instance NFData Script where
   rnf (Script bs) = rnf bs
 
 instance NFData Pubkey where
-  rnf (Pubkey x) = rnf x
-
-instance NFData Point where
-  rnf (Point x) = rnf x
+  rnf pk = rnf (unPubkey pk)
 
 instance NFData RevocationPubkey where
   rnf (RevocationPubkey x) = rnf x
