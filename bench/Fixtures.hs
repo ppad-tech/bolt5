@@ -84,7 +84,7 @@ build = do
     "023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"
   remote_fund <- pt
     "030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"
-  funding_txid <- BT.mkTxId =<< unhex
+  funding_txid <- BT.mk_txid =<< unhex
     "bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489"
   cn <- commitment_number 42
   dust <- BOLT1.satoshi 546

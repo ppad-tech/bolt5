@@ -34,7 +34,7 @@ module Lightning.Protocol.BOLT5.Spend (
   , spend_anchor_anyone
   ) where
 
-import Bitcoin.Prim.Tx (OutPoint, Tx(..), TxIn(..), TxOut(..))
+import Bitcoin.Prim.Tx (OutPoint, Tx(..), TxIn(..), TxOut(..), Witness(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
@@ -401,11 +401,11 @@ mk_spending_tx !op !sq (Script dest) !value !locktime = Tx
       { txin_prevout    = op
       , txin_script_sig = BS.empty
       , txin_sequence   = sq
+      , txin_witness    = Witness []
       } :| []
   , tx_outputs   = TxOut
       { txout_value         = BOLT1.un_satoshi value
       , txout_script_pubkey = dest
       } :| []
-  , tx_witnesses = []
   , tx_locktime  = locktime
   }

@@ -2,7 +2,7 @@
 
 module Main where
 
-import Bitcoin.Prim.Tx (OutPoint(..), Tx(..), TxId(..), TxIn(..),
+import Bitcoin.Prim.Tx (OutPoint(..), Tx(..), TxId, TxIn(..),
                         TxOut(..), Witness(..))
 import qualified Bitcoin.Prim.Tx as BT
 import Bitcoin.Prim.Tx.Sighash (SighashType(..), encode_sighash)
@@ -175,7 +175,7 @@ prop_fx k = case fixtures of
   Just fx -> property (k fx)
 
 dummyTxId :: TxId
-dummyTxId = TxId (BS.replicate 32 0x00)
+dummyTxId = BT.null_txid
 
 dummyOutPoint :: OutPoint
 dummyOutPoint = OutPoint dummyTxId 0
@@ -280,7 +280,7 @@ vecCommitment
   -> IO CommitmentTx
 vecCommitment feerate fmt toLocal htlcs = do
   keys <- vecKeys
-  fundingTxid <- need "funding txid" $ BT.mkTxId =<< unhex
+  fundingTxid <- need "funding txid" $ BT.mk_txid =<< unhex
     "bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489"
   cn <- need "commitment number" (commitment_number 42)
   localBp <- pt
@@ -437,9 +437,9 @@ parseTx = need "invalid transaction hex" . BT.from_base16
 
 -- | Witness stack of a single-input transaction.
 singleWitness :: Tx -> IO [BS.ByteString]
-singleWitness tx = case tx_witnesses tx of
-  [Witness items] -> pure items
-  _ -> assertFailure "expected a single witness"
+singleWitness tx = case tx_inputs tx of
+  i :| [] | Witness items <- txin_witness i -> pure items
+  _ -> assertFailure "expected a single input"
 
 -- | Remote signature and offered HTLC witness script, taken from the
 --   Appendix C HTLC-timeout tx for htlc #5.
@@ -487,7 +487,8 @@ assertHtlcTx :: B5.SpendingTx -> BS.ByteString -> Assertion
 assertHtlcTx stx vec = do
   tx <- parseTx vec
   items <- singleWitness tx
-  B5.stx_tx stx @?= tx { tx_witnesses = [] }
+  B5.stx_tx stx @?= tx { tx_inputs = fmap
+    (\i -> i { txin_witness = Witness [] }) (tx_inputs tx) }
   case reverse items of
     script : _ -> B5.stx_input_script stx @?= Script script
     [] -> assertFailure "empty witness"
