@@ -3,12 +3,15 @@
 
 module Main where
 
-import Bitcoin.Prim.Tx (TxOut(..))
-import Bitcoin.Prim.Tx.Sighash (SighashType(..))
+import Bitcoin.Prim.Tx (TxOut(..), from_base16)
+import Bitcoin.Prim.Tx.Sighash (SighashType(..), encode_sighash)
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Word (Word8, Word32, Word64)
 import Lightning.Protocol.BOLT3 hiding
   (txout_value, txout_script)
+import Lightning.Protocol.BOLT3.Types (Pubkey(..), PaymentHash(..))
 import qualified Lightning.Protocol.BOLT5 as B5
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -29,51 +32,38 @@ main = defaultMain $ testGroup "ppad-bolt5" [
 
 -- test fixtures ------------------------------------------------------
 
--- Dummy 33-byte pubkey
-dummyPubkeyBytes :: BS.ByteString
-dummyPubkeyBytes = BS.pack $
-  0x02 : replicate 32 0x01
-
 -- Dummy 32-byte hash
 dummyHash32 :: BS.ByteString
 dummyHash32 = BS.replicate 32 0xAA
 
--- Dummy 32-byte preimage
-dummyPreimage :: BS.ByteString
-dummyPreimage = BS.replicate 32 0xBB
-
 dummyTxId :: TxId
-dummyTxId = case mkTxId (BS.replicate 32 0x00) of
-  Just tid -> tid
-  Nothing  -> error "impossible"
+dummyTxId = TxId (BS.replicate 32 0x00)
 
 dummyOutPoint :: OutPoint
 dummyOutPoint = OutPoint dummyTxId 0
 
-dummyPubkey :: Pubkey
-dummyPubkey = case pubkey dummyPubkeyBytes of
-  Just pk -> pk
-  Nothing -> error "impossible"
+-- Dummy 33-byte pubkey. Each role gets its own key, so a key used
+-- in the wrong role changes the script.
+mkPubkey :: Word8 -> Pubkey
+mkPubkey b = Pubkey (BS.pack (0x02 : replicate 32 b))
 
 dummyRevocationPubkey :: RevocationPubkey
-dummyRevocationPubkey = RevocationPubkey dummyPubkey
+dummyRevocationPubkey = RevocationPubkey (mkPubkey 0x01)
 
 dummyLocalDelayedPubkey :: LocalDelayedPubkey
-dummyLocalDelayedPubkey = LocalDelayedPubkey dummyPubkey
+dummyLocalDelayedPubkey = LocalDelayedPubkey (mkPubkey 0x02)
 
 dummyLocalHtlcPubkey :: LocalHtlcPubkey
-dummyLocalHtlcPubkey = LocalHtlcPubkey dummyPubkey
+dummyLocalHtlcPubkey = LocalHtlcPubkey (mkPubkey 0x03)
 
 dummyRemoteHtlcPubkey :: RemoteHtlcPubkey
-dummyRemoteHtlcPubkey = RemoteHtlcPubkey dummyPubkey
+dummyRemoteHtlcPubkey = RemoteHtlcPubkey (mkPubkey 0x04)
 
 dummyFundingPubkey :: FundingPubkey
-dummyFundingPubkey = FundingPubkey dummyPubkey
+dummyFundingPubkey = FundingPubkey (mkPubkey 0x07)
 
 dummyPaymentHash :: PaymentHash
-dummyPaymentHash = case paymentHash dummyHash32 of
-  Just ph -> ph
-  Nothing -> error "impossible"
+dummyPaymentHash = PaymentHash dummyHash32
 
 dummyDelay :: ToSelfDelay
 dummyDelay = ToSelfDelay 144
@@ -97,10 +87,10 @@ dummyKeys = CommitmentKeys
   , ck_local_delayed = dummyLocalDelayedPubkey
   , ck_local_htlc = dummyLocalHtlcPubkey
   , ck_remote_htlc = dummyRemoteHtlcPubkey
-  , ck_local_payment = LocalPubkey dummyPubkey
-  , ck_remote_payment = RemotePubkey dummyPubkey
+  , ck_local_payment = LocalPubkey (mkPubkey 0x05)
+  , ck_remote_payment = RemotePubkey (mkPubkey 0x06)
   , ck_local_funding = dummyFundingPubkey
-  , ck_remote_funding = dummyFundingPubkey
+  , ck_remote_funding = FundingPubkey (mkPubkey 0x08)
   }
 
 dummyHTLC :: HTLC
@@ -179,9 +169,9 @@ dummyLocalCommitWithHTLCs = CommitmentTx
           OutputToLocal
       , TxOutput (Satoshi 30000) dummyDestScript
           OutputToRemote
-      , TxOutput (Satoshi 10000) offeredScript
+      , TxOutput (Satoshi 1000) offeredScript
           (OutputOfferedHTLC (CltvExpiry 500000))
-      , TxOutput (Satoshi 10000) receivedScript
+      , TxOutput (Satoshi 1000) receivedScript
           (OutputReceivedHTLC (CltvExpiry 500000))
       ]
   , ctx_funding_script = dummyDestScript
@@ -202,6 +192,300 @@ dummyRemoteCommitTx = CommitmentTx
       ]
   , ctx_funding_script = dummyDestScript
   }
+
+-- BOLT #3 Appendix C/F vectors -------------------------------------
+
+-- | Payment hash of an Appendix C HTLC whose preimage is 32 copies
+--   of the given byte.
+vecPaymentHash :: Word8 -> PaymentHash
+vecPaymentHash b = PaymentHash (SHA256.hash (BS.replicate 32 b))
+
+-- | Decode a hex string.
+unhex :: BS.ByteString -> Maybe BS.ByteString
+unhex bs
+  | odd (BS.length bs) = Nothing
+  | otherwise = BS.pack <$> go (BS.unpack bs)
+  where
+    go (a:b:rest) = (:) <$> byte a b <*> go rest
+    go _ = Just []
+    byte a b = (\hi lo -> hi * 16 + lo) <$> nibble a <*> nibble b
+    nibble c
+      | c >= 0x30 && c <= 0x39 = Just (c - 0x30)
+      | c >= 0x61 && c <= 0x66 = Just (c - 0x57)
+      | otherwise = Nothing
+
+-- | An Appendix C HTLC, given its direction, amount (msat), expiry
+--   and preimage byte.
+vecHtlc :: HTLCDirection -> Word64 -> Word32 -> Word8 -> HTLC
+vecHtlc dir msat expiry b = HTLC
+  { htlc_direction = dir
+  , htlc_amount_msat = MilliSatoshi msat
+  , htlc_payment_hash = vecPaymentHash b
+  , htlc_cltv_expiry = CltvExpiry expiry
+  }
+
+vecHtlc0, vecHtlc1, vecHtlc2, vecHtlc3, vecHtlc4 :: HTLC
+vecHtlc0 = vecHtlc HTLCReceived 1000000 500 0x00
+vecHtlc1 = vecHtlc HTLCReceived 2000000 501 0x01
+vecHtlc2 = vecHtlc HTLCOffered 2000000 502 0x02
+vecHtlc3 = vecHtlc HTLCOffered 3000000 503 0x03
+vecHtlc4 = vecHtlc HTLCReceived 4000000 504 0x04
+
+vecHtlc5, vecHtlc6 :: HTLC
+vecHtlc5 = vecHtlc HTLCOffered 5000000 506 0x05
+vecHtlc6 = vecHtlc HTLCOffered 5000001 505 0x05
+
+-- | Appendix C keys for the local commitment (Appendix F uses the
+--   same keys).
+vecKeys :: Maybe CommitmentKeys
+vecKeys = do
+  rev <- key
+    "0212a140cd0c6539d07cd08dfe09984dec3251ea808b892efeac3ede9402bf2b19"
+  delayed <- key
+    "03fd5960528dc152014952efdb702a88f71e3c1653b2314431701ec77e57fde83c"
+  localHtlc <- key
+    "030d417a46946384f88d5f3337267c5e579765875dc4daca813e21734b140639e7"
+  remoteHtlc <- key
+    "0394854aa6eab5b2a8122cc726e9dded053a2184d88256816826d6231c068d4a5b"
+  localPayment <- key
+    "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+  remotePayment <- key
+    "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991"
+  localFunding <- key
+    "023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"
+  remoteFunding <- key
+    "030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"
+  pure CommitmentKeys
+    { ck_revocation_pubkey = RevocationPubkey rev
+    , ck_local_delayed = LocalDelayedPubkey delayed
+    , ck_local_htlc = LocalHtlcPubkey localHtlc
+    , ck_remote_htlc = RemoteHtlcPubkey remoteHtlc
+    , ck_local_payment = LocalPubkey localPayment
+    , ck_remote_payment = RemotePubkey remotePayment
+    , ck_local_funding = FundingPubkey localFunding
+    , ck_remote_funding = FundingPubkey remoteFunding
+    }
+  where
+    key h = unhex h >>= pubkey
+
+-- | Rebuild an Appendix C/F local commitment with bolt3, given the
+--   feerate, channel features, to_local balance and HTLCs.
+vecCommitment
+  :: FeeratePerKw -> ChannelFeatures -> MilliSatoshi -> [HTLC]
+  -> Maybe CommitmentTx
+vecCommitment feerate features toLocal htlcs = do
+  keys <- vecKeys
+  fundingTxid <- mkTxId =<< unhex
+    "bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489"
+  cn <- commitment_number 42
+  localBp <- point =<< unhex
+    "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+  remoteBp <- point =<< unhex
+    "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991"
+  pure $ build_commitment_tx CommitmentContext
+    { cc_funding_outpoint = OutPoint fundingTxid 0
+    , cc_commitment_number = cn
+    , cc_local_payment_bp = PaymentBasepoint localBp
+    , cc_remote_payment_bp = PaymentBasepoint remoteBp
+    , cc_to_self_delay = ToSelfDelay 144
+    , cc_dust_limit = DustLimit (Satoshi 546)
+    , cc_feerate = feerate
+    , cc_features = features
+    , cc_is_funder = True
+    , cc_to_local_msat = toLocal
+    , cc_to_remote_msat = MilliSatoshi 3000000000
+    , cc_htlcs = htlcs
+    , cc_keys = keys
+    }
+
+-- | The Appendix C commitment with two offered HTLCs sharing a
+--   payment hash and amount.
+vecCommitSameHash :: Maybe CommitmentTx
+vecCommitSameHash = vecCommitment (FeeratePerKw 253)
+  (ChannelFeatures False) (MilliSatoshi 6987999999)
+  [vecHtlc1, vecHtlc5, vecHtlc6]
+
+-- | The Appendix F (anchors) "commitment tx with seven outputs
+--   untrimmed".
+vecCommitAnchors :: Maybe CommitmentTx
+vecCommitAnchors = vecCommitment (FeeratePerKw 644)
+  (ChannelFeatures True) (MilliSatoshi 6988000000)
+  [vecHtlc0, vecHtlc1, vecHtlc2, vecHtlc3, vecHtlc4]
+
+-- | Appendix C: commitment tx with 3 htlc outputs, 2 offered
+--   having the same amount and preimage (signed).
+vecCCommitSameHash :: BS.ByteString
+vecCCommitSameHash =
+  "02000000000101bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b\
+  \820b584a488489000000000038b02b8005d007000000000000220020748eba94\
+  \4fedc8827f6b06bc44678f93c0f9e6078b35c6331ed31e75f8ce0c2d88130000\
+  \00000000220020305c12e1a0bc21e283c131cea1c66d68857d28b7b2fce0a6fb\
+  \c40c164852121b8813000000000000220020305c12e1a0bc21e283c131cea1c6\
+  \6d68857d28b7b2fce0a6fbc40c164852121bc0c62d0000000000160014cc1b07\
+  \838e387deacd0e5232e1e8b49f4c29e484a69f6a00000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e04004730\
+  \4402200d10bf5bc5397fc59d7188ae438d80c77575595a2d488e41bd6363a810\
+  \cc8d72022012b57e714fbbfdf7a28c47d5b370cb8ac37c8545f596216e5b21e9\
+  \b236ef457c0147304402207d0870964530f97b62497b11153c551dca0a1e2268\
+  \15ef0a336651158da0f82402200f5378beee0e77759147b8a0a284decd11bfd2\
+  \bc55c8fafa41c134fe996d43c801475221023da092f6980e58d2c037173180e9\
+  \a465476026ee50f96695963e8efe436f54eb21030e9f7b623d2ccc7c9bd44d66\
+  \d5ce21ce504c0acf6385a132cec6d3c39fa711c152ae3e195220"
+
+-- | Appendix C: HTLC-success tx for htlc #1 from the same
+--   commitment (signed).
+vecCHtlcSuccess1 :: BS.ByteString
+vecCHtlcSuccess1 =
+  "020000000001014bdccf28653066a2c554cafeffdfe1e678e64a69b056684deb\
+  \0c4fba909423ec000000000000000000011f070000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004830\
+  \45022100b470fe12e5b7fea9eccb8cbff1972cea4f96758041898982a02bcc7f\
+  \9d56d50b0220338a75b2afaab4ec00cdd2d9273c68c7581ff5a28bcbb40c4d13\
+  \8b81f1d45ce501473044022017b90c65207522a907fb6a137f9dd528b3389465\
+  \a8ae72308d9e1d564f512cf402204fc917b4f0e88604a3e994f85bfae7c7c1f9\
+  \d9e9f78e8cd112e0889720d9405b012001010101010101010101010101010101\
+  \010101010101010101010101010101018a76a91414011f7254d96b819c76986c\
+  \277d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a21\
+  \84d88256816826d6231c068d4a5b7c8201208763a9144b6b2e5444c2639cc0fb\
+  \7bcea5afba3f3cdce23988527c21030d417a46946384f88d5f3337267c5e5797\
+  \65875dc4daca813e21734b140639e752ae677502f501b175ac686800000000"
+
+-- | Appendix C: HTLC-timeout tx for htlc #6 from the same
+--   commitment (signed).
+vecCHtlcTimeout6 :: BS.ByteString
+vecCHtlcTimeout6 =
+  "020000000001014bdccf28653066a2c554cafeffdfe1e678e64a69b056684deb\
+  \0c4fba909423ec01000000000000000001e1120000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004830\
+  \45022100b575379f6d8743cb0087648f81cfd82d17a97fbf8f67e058c65ce8b9\
+  \d25df9500220554a210d65b02d9f36c6adf0f639430ca8293196ba5089bf67cc\
+  \3a9813b7b00a01483045022100ee2e16b90930a479b13f8823a7f14b600198c8\
+  \38161160b9436ed086d3fc57e002202a66fa2324f342a17129949c640bfe934c\
+  \bc73a869ba7c06aa25c5a3d0bfb53d01008576a91414011f7254d96b819c7698\
+  \6c277d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a\
+  \2184d88256816826d6231c068d4a5b7c820120876475527c21030d417a469463\
+  \84f88d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a91420\
+  \02cc93ebefbb1b73f0af055dcc27a0b504ad7688ac6868f9010000"
+
+-- | Appendix C: HTLC-timeout tx for htlc #5 from the same
+--   commitment (signed).
+vecCHtlcTimeout5 :: BS.ByteString
+vecCHtlcTimeout5 =
+  "020000000001014bdccf28653066a2c554cafeffdfe1e678e64a69b056684deb\
+  \0c4fba909423ec02000000000000000001e1120000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004730\
+  \440220471c9f3ad92e49b13b7b8059f43ecf8f7887b0dccbb9fdb54bfe23d62a\
+  \8ae332022024bd22fae0740e86a44228c35330da9526fd7306dffb2b9dc362d5\
+  \e78abef7cc0147304402207157f452f2506d73c315192311893800cfb3cc235c\
+  \c1185b1cfcc136b55230db022014be242dbc6c5da141fec4034e7f387f74d6ff\
+  \1899453d72ba957467540e1ecb01008576a91414011f7254d96b819c76986c27\
+  \7d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a2184\
+  \d88256816826d6231c068d4a5b7c820120876475527c21030d417a46946384f8\
+  \8d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a9142002cc\
+  \93ebefbb1b73f0af055dcc27a0b504ad7688ac6868fa010000"
+
+-- | Appendix F: HTLC-timeout tx for htlc #2 from "commitment tx
+--   with seven outputs untrimmed" (signed).
+vecFHtlcTimeout2 :: BS.ByteString
+vecFHtlcTimeout2 =
+  "02000000000101b8cefef62ea66f5178b9361b2371be0759cbc8c689bcfa7a8e\
+  \6746d497ec221a03000000000100000001d0070000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004830\
+  \45022100a847bc3b8cf2441013725ae32dc589c419835d069afd6d7f3d9834d8\
+  \be7cea6e02204ce9d35ec7f0788da80e4d62e810c4ccd13617e58fa10832e38f\
+  \b7ae87bdf33883473044022026739b1adbfa34c485bf0e5a19e0cf7532f64545\
+  \bcc5c95b95643ccc2d351e1902201743bb1b34f00e031cc15f6eff0f8ab76450\
+  \8d2681ff965ba62e76e540bca1e801008876a91414011f7254d96b819c76986c\
+  \277d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a21\
+  \84d88256816826d6231c068d4a5b7c820120876475527c21030d417a46946384\
+  \f88d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a914b43e\
+  \1b38138a41b37f7cd9a1d274bc63e3a9b5d188ac6851b27568f6010000"
+
+-- | Appendix F: HTLC-success tx for htlc #1 from "commitment tx
+--   with seven outputs untrimmed" (signed).
+vecFHtlcSuccess1 :: BS.ByteString
+vecFHtlcSuccess1 =
+  "02000000000101b8cefef62ea66f5178b9361b2371be0759cbc8c689bcfa7a8e\
+  \6746d497ec221a04000000000100000001d0070000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004730\
+  \44022035977f2aa6d6ae12f1dae3366440faa17558e9c88c3188bfc8df7e276c\
+  \6c65410220659f1f9070c725d9d46e43b99a36fc6d711d36069704add2d57fc1\
+  \fa2818cf12834730440220191ba44e57b1601a59d99f85971d4801b286d428de\
+  \275487c87ceeb8df1a4811022002215875d92833df0c9615c9096cf97152f871\
+  \39ed9f82718bbb5b8b3d31252401200101010101010101010101010101010101\
+  \0101010101010101010101010101018d76a91414011f7254d96b819c76986c27\
+  \7d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a2184\
+  \d88256816826d6231c068d4a5b7c8201208763a9144b6b2e5444c2639cc0fb7b\
+  \cea5afba3f3cdce23988527c21030d417a46946384f88d5f3337267c5e579765\
+  \875dc4daca813e21734b140639e752ae677502f501b175ac6851b27568000000\
+  \00"
+
+-- | Parse a hex-encoded transaction, failing the test otherwise.
+parseTx :: BS.ByteString -> IO Tx
+parseTx = assertJust "invalid transaction hex" . from_base16
+
+-- | Witness stack of a single-input transaction.
+singleWitness :: Tx -> IO [BS.ByteString]
+singleWitness tx = case tx_witnesses tx of
+  [Witness items] -> pure items
+  _ -> assertFailure "expected a single witness"
+
+-- | Remote signature and offered HTLC witness script, taken from the
+--   Appendix C HTLC-timeout tx for htlc #5.
+offeredClaimParts :: IO (BS.ByteString, BS.ByteString)
+offeredClaimParts = do
+  items <- singleWitness =<< parseTx vecCHtlcTimeout5
+  case items of
+    [_, sig, _, _, script] -> pure (sig, script)
+    _ -> assertFailure "unexpected HTLC-timeout witness"
+
+-- | Build the HTLC tx for an HTLC output of an Appendix C/F
+--   commitment (to_self_delay 144).
+vecHtlcTx :: FeeratePerKw -> B5.UnresolvedOutput -> IO B5.SpendingTx
+vecHtlcTx feerate uo = case B5.uo_type uo of
+  B5.SpendHTLCTimeout htlc keys features ->
+    pure (B5.spend_htlc_timeout (ctx htlc keys features) keys)
+  B5.SpendHTLCSuccess htlc keys features ->
+    pure (B5.spend_htlc_success (ctx htlc keys features) keys)
+  other -> assertFailure ("expected an HTLC output, got " <> show other)
+  where
+    ctx htlc keys features = HTLCContext
+      { hc_commitment_txid = op_txid (B5.uo_outpoint uo)
+      , hc_output_index = op_vout (B5.uo_outpoint uo)
+      , hc_htlc = htlc
+      , hc_to_self_delay = ToSelfDelay 144
+      , hc_feerate = feerate
+      , hc_features = features
+      , hc_revocation_pubkey = ck_revocation_pubkey keys
+      , hc_local_delayed = ck_local_delayed keys
+      }
+
+-- | Check an HTLC tx against a signed BOLT #3 vector: the unsigned
+--   tx and the witness script must match.
+assertHtlcTx :: B5.SpendingTx -> BS.ByteString -> Assertion
+assertHtlcTx stx vec = do
+  tx <- parseTx vec
+  items <- singleWitness tx
+  B5.stx_tx stx @?= tx { tx_witnesses = [] }
+  case reverse items of
+    script : _ -> B5.stx_input_script stx @?= Script script
+    [] -> assertFailure "empty witness"
+
+-- | Check the sighash flags of the signatures in a signed BOLT #3
+--   HTLC-tx vector: the local one must be the type the 'SpendingTx'
+--   gives, the remote one the given type.
+assertSighashFlags
+  :: B5.SpendingTx -> SighashType -> BS.ByteString -> Assertion
+assertSighashFlags stx remoteType vec = do
+  items <- singleWitness =<< parseTx vec
+  case items of
+    [_, remoteSig, localSig, _, _] -> do
+      flag remoteSig @?= Just (encode_sighash remoteType)
+      flag localSig
+        @?= Just (encode_sighash (B5.stx_sighash_type stx))
+    _ -> assertFailure "unexpected HTLC-tx witness"
+  where
+    flag = fmap (fromIntegral . snd) . BS.unsnoc
 
 -- types tests --------------------------------------------------------
 
@@ -227,6 +511,8 @@ types_tests = testGroup "Types" [
       B5.to_local_penalty_input_weight @?= 324
       B5.offered_htlc_penalty_input_weight @?= 407
       B5.accepted_htlc_penalty_input_weight @?= 413
+      B5.offered_htlc_penalty_input_weight_anchors @?= 410
+      B5.accepted_htlc_penalty_input_weight_anchors @?= 416
       B5.to_remote_input_weight @?= 272
       B5.max_standard_weight @?= 400000
   ]
@@ -235,52 +521,66 @@ types_tests = testGroup "Types" [
 
 detect_tests :: TestTree
 detect_tests = testGroup "Detect" [
-    testCase "extract_preimage_offered - valid" $ do
-      let sig = BS.replicate 72 0x30
-          preimage = dummyPreimage
-          wit = Witness [sig, preimage]
-      case B5.extract_preimage_offered wit of
-        Just pp ->
-          unPaymentPreimage pp @?= preimage
-        Nothing ->
-          assertFailure "expected preimage"
+    testCase "extract_preimage_htlc_success - Appendix C" $ do
+      items <- singleWitness =<< parseTx vecCHtlcSuccess1
+      fmap unPaymentPreimage
+        (B5.extract_preimage_htlc_success
+          (vecPaymentHash 0x01) (Witness items))
+        @?= Just (BS.replicate 32 0x01)
 
-  , testCase "extract_preimage_offered - wrong length" $ do
-      let sig = BS.replicate 72 0x30
-          badPreimage = BS.replicate 31 0xBB
-          wit = Witness [sig, badPreimage]
-      B5.extract_preimage_offered wit @?= Nothing
+  , testCase "extract_preimage_htlc_success - Appendix F" $ do
+      items <- singleWitness =<< parseTx vecFHtlcSuccess1
+      fmap unPaymentPreimage
+        (B5.extract_preimage_htlc_success
+          (vecPaymentHash 0x01) (Witness items))
+        @?= Just (BS.replicate 32 0x01)
 
-  , testCase "extract_preimage_offered - wrong count" $ do
-      let sig = BS.replicate 72 0x30
-          wit = Witness [sig]
-      B5.extract_preimage_offered wit @?= Nothing
+  , testCase "extract_preimage_htlc_success - wrong hash" $ do
+      items <- singleWitness =<< parseTx vecCHtlcSuccess1
+      B5.extract_preimage_htlc_success
+        (vecPaymentHash 0x05) (Witness items)
+        @?= Nothing
 
-  , testCase "extract_preimage_htlc_success - valid" $ do
-      let zero = BS.empty
-          remoteSig = BS.replicate 72 0x30
-          localSig = BS.replicate 72 0x30
-          preimage = dummyPreimage
-          wit = Witness [zero, remoteSig, localSig, preimage]
-      case B5.extract_preimage_htlc_success wit of
-        Just pp ->
-          unPaymentPreimage pp @?= preimage
-        Nothing ->
-          assertFailure "expected preimage"
+  , testCase "extract_preimage_htlc_success - timeout witness" $ do
+      items <- singleWitness =<< parseTx vecCHtlcTimeout5
+      B5.extract_preimage_htlc_success
+        (vecPaymentHash 0x05) (Witness items)
+        @?= Nothing
 
-  , testCase "extract_preimage_htlc_success - wrong count" $ do
-      let wit = Witness [BS.empty, dummyPreimage]
-      B5.extract_preimage_htlc_success wit @?= Nothing
+  , testCase "extract_preimage_htlc_success - no script" $ do
+      items <- singleWitness =<< parseTx vecCHtlcSuccess1
+      B5.extract_preimage_htlc_success
+        (vecPaymentHash 0x01) (Witness (take 4 items))
+        @?= Nothing
 
-  , testCase "extract_preimage_htlc_success - wrong length" $
-      do
-      let zero = BS.empty
-          remoteSig = BS.replicate 72 0x30
-          localSig = BS.replicate 72 0x30
-          badPreimage = BS.replicate 31 0xBB
-          wit = Witness
-            [zero, remoteSig, localSig, badPreimage]
-      B5.extract_preimage_htlc_success wit @?= Nothing
+  , testCase "extract_preimage_offered - remote claim" $ do
+      -- <remotehtlcsig> <payment_preimage> <witness_script>; the
+      -- signature is not checked.
+      (sig, script) <- offeredClaimParts
+      let preimage = BS.replicate 32 0x05
+      fmap unPaymentPreimage
+        (B5.extract_preimage_offered (vecPaymentHash 0x05)
+          (Witness [sig, preimage, script]))
+        @?= Just preimage
+
+  , testCase "extract_preimage_offered - wrong hash" $ do
+      (sig, script) <- offeredClaimParts
+      B5.extract_preimage_offered (vecPaymentHash 0x01)
+        (Witness [sig, BS.replicate 32 0x05, script])
+        @?= Nothing
+
+  , testCase "extract_preimage_offered - revocation spend" $ do
+      -- <revocation_sig> <revocationpubkey> <witness_script>
+      (sig, script) <- offeredClaimParts
+      B5.extract_preimage_offered (vecPaymentHash 0x05)
+        (Witness [sig, unPubkey (mkPubkey 0x01), script])
+        @?= Nothing
+
+  , testCase "extract_preimage_offered - no script" $ do
+      (sig, _) <- offeredClaimParts
+      B5.extract_preimage_offered (vecPaymentHash 0x05)
+        (Witness [sig, BS.replicate 32 0x05])
+        @?= Nothing
 
   , testCase "htlc_timed_out - at expiry" $ do
       let htlc = dummyHTLC
@@ -302,27 +602,31 @@ detect_tests = testGroup "Detect" [
 
 classify_tests :: TestTree
 classify_tests = testGroup "Classify" [
-    testCase "identify_close - local commit" $ do
-      case encode_tx_for_signing dummyLocalCommitTx of
-        Nothing -> assertFailure "encode failed"
-        Just localBytes ->
-          B5.identify_close
-            dummyLocalCommitTx
-            dummyRemoteCommitTx
-            localBytes
-          @?= Just B5.LocalCommitClose
+    testCase "identify_close - signed local commitment" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      signed <- assertJust "hex" (unhex vecCCommitSameHash)
+      B5.identify_close commit dummyRemoteCommitTx signed
+        @?= Just B5.LocalCommitClose
 
-  , testCase "identify_close - remote commit" $ do
-      case encode_tx_for_signing dummyRemoteCommitTx of
-        Nothing -> assertFailure "encode failed"
-        Just remoteBytes ->
-          B5.identify_close
-            dummyLocalCommitTx
-            dummyRemoteCommitTx
-            remoteBytes
-          @?= Just B5.RemoteCommitClose
+  , testCase "identify_close - signed remote commitment" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      signed <- assertJust "hex" (unhex vecCCommitSameHash)
+      B5.identify_close dummyLocalCommitTx commit signed
+        @?= Just B5.RemoteCommitClose
+
+  , testCase "identify_close - unsigned commitment" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      unsigned <- assertJust "encode" (encode_tx_for_signing commit)
+      B5.identify_close commit dummyRemoteCommitTx unsigned
+        @?= Just B5.LocalCommitClose
 
   , testCase "identify_close - no match" $ do
+      signed <- assertJust "hex" (unhex vecCCommitSameHash)
+      B5.identify_close
+        dummyLocalCommitTx dummyRemoteCommitTx signed
+        @?= Nothing
+
+  , testCase "identify_close - unparseable" $ do
       B5.identify_close
         dummyLocalCommitTx
         dummyRemoteCommitTx
@@ -375,10 +679,10 @@ classify_tests = testGroup "Classify" [
             , ctx_outputs =
                 [ TxOutput (Satoshi 50000) toLocalScript
                     OutputToLocal
-                , TxOutput (Satoshi 10000) offeredScript
+                , TxOutput (Satoshi 1000) offeredScript
                     (OutputOfferedHTLC
                       (CltvExpiry 500000))
-                , TxOutput (Satoshi 10000) receivedScript
+                , TxOutput (Satoshi 1000) receivedScript
                     (OutputReceivedHTLC
                       (CltvExpiry 500000))
                 ]
@@ -497,6 +801,80 @@ classify_tests = testGroup "Classify" [
         emptyCommit dummyKeys dummyDelay
         dummyFeatures []
       @?= []
+
+  , testCase "classify_local - HTLCs sharing a payment hash" $ do
+      -- Appendix C: htlcs #5 and #6 share a payment hash and amount
+      -- (5000 sat) and differ only in CLTV expiry (506 and 505).
+      commit <- assertJust "commitment" vecCommitSameHash
+      keys <- assertJust "keys" vecKeys
+      let features = ChannelFeatures False
+          outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) features
+            [vecHtlc1, vecHtlc5, vecHtlc6]
+      map B5.uo_type (take 3 outs) @?=
+        [ B5.SpendHTLCSuccess vecHtlc1 keys features
+        , B5.SpendHTLCTimeout vecHtlc6 keys features
+        , B5.SpendHTLCTimeout vecHtlc5 keys features
+        ]
+
+  , testCase "HTLC txs - Appendix C, shared payment hash" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) (ChannelFeatures False)
+            [vecHtlc1, vecHtlc5, vecHtlc6]
+      case outs of
+        o0 : o1 : o2 : _ -> do
+          stx0 <- vecHtlcTx (FeeratePerKw 253) o0
+          assertHtlcTx stx0 vecCHtlcSuccess1
+          stx1 <- vecHtlcTx (FeeratePerKw 253) o1
+          assertHtlcTx stx1 vecCHtlcTimeout6
+          assertSighashFlags stx1 SIGHASH_ALL vecCHtlcTimeout6
+          stx2 <- vecHtlcTx (FeeratePerKw 253) o2
+          assertHtlcTx stx2 vecCHtlcTimeout5
+        _ -> assertFailure "expected at least 3 outputs"
+
+  , testCase "classify_remote - HTLCs sharing a payment hash" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_remote_commit_outputs commit keys
+            (ChannelFeatures False)
+            [vecHtlc1, vecHtlc5, vecHtlc6]
+      map B5.uo_type (take 3 outs) @?=
+        [ B5.SpendHTLCTimeoutDirect vecHtlc1
+        , B5.SpendHTLCPreimageDirect vecHtlc6
+        , B5.SpendHTLCPreimageDirect vecHtlc5
+        ]
+
+  , testCase "classify_local - HTLCs differing only in amount" $ do
+      let hA = vecHtlc HTLCOffered 5000000 600 0x07
+          hB = vecHtlc HTLCOffered 9000000 600 0x07
+          features = ChannelFeatures False
+      commit <- assertJust "commitment" $ vecCommitment
+        (FeeratePerKw 253) features (MilliSatoshi 6000000000)
+        [hA, hB]
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) features [hB, hA]
+      [ (B5.uo_value o, h)
+        | o <- outs
+        , B5.SpendHTLCTimeout h _ _ <- [B5.uo_type o] ]
+        @?= [(Satoshi 5000, hA), (Satoshi 9000, hB)]
+
+  , testCase "classify_local - each HTLC matches one output" $ do
+      let h = vecHtlc HTLCOffered 5000000 600 0x07
+          features = ChannelFeatures False
+      commit <- assertJust "commitment" $ vecCommitment
+        (FeeratePerKw 253) features (MilliSatoshi 6000000000)
+        [h, h]
+      keys <- assertJust "keys" vecKeys
+      let timeouts hs = length
+            [ ()
+            | o <- B5.classify_local_commit_outputs commit keys
+                     (ToSelfDelay 144) features hs
+            , B5.SpendHTLCTimeout {} <- [B5.uo_type o] ]
+      timeouts [h] @?= 1
+      timeouts [h, h] @?= 2
   ]
 
 -- spend tests --------------------------------------------------------
@@ -597,77 +975,6 @@ spend_tests = testGroup "Spend" [
       B5.stx_input_script stx1 @?=
         B5.stx_input_script stx2
 
-  , testCase "spend_revoked_batch total value" $ do
-      let op1 = OutPoint dummyTxId 0
-          op2 = OutPoint dummyTxId 1
-          ro1 = B5.RevokedOutput op1 (Satoshi 50000)
-            B5.RevokedToLocal
-          ro2 = B5.RevokedOutput op2 (Satoshi 30000)
-            B5.RevokedToLocal
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro1 :| [ro2]
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      stx <- assertJust "spend_revoked_batch" $
-        B5.spend_revoked_batch pctx
-      let tx = B5.stx_tx stx
-          outVal = txout_value
-            (head' (tx_outputs tx))
-      -- Output should be less than total input
-      assertBool "output < total input"
-        (outVal < 80000)
-      -- Should have 2 inputs
-      length (tx_inputs tx) @?= 2
-
-  , testCase "spend_revoked_batch single element" $ do
-      let ro = B5.RevokedOutput
-            dummyOutPoint (Satoshi 50000)
-            B5.RevokedToLocal
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro :| []
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      stx <- assertJust "spend_revoked_batch" $
-        B5.spend_revoked_batch pctx
-      let tx = B5.stx_tx stx
-      length (tx_inputs tx) @?= 1
-      length (tx_outputs tx) @?= 1
-
-  , testCase "spend_revoked_batch mixed types" $ do
-      let op1 = OutPoint dummyTxId 0
-          op2 = OutPoint dummyTxId 1
-          op3 = OutPoint dummyTxId 2
-          ro1 = B5.RevokedOutput op1
-            (Satoshi 50000)
-            B5.RevokedToLocal
-          ro2 = B5.RevokedOutput op2
-            (Satoshi 10000)
-            (B5.RevokedHTLC
-              (B5.HTLCOfferedOutput
-                (CltvExpiry 500000)))
-          ro3 = B5.RevokedOutput op3
-            (Satoshi 10000)
-            (B5.RevokedHTLC
-              (B5.HTLCReceivedOutput
-                (CltvExpiry 500000)))
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro1 :| [ro2, ro3]
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      stx <- assertJust "spend_revoked_batch" $
-        B5.spend_revoked_batch pctx
-      let tx = B5.stx_tx stx
-      length (tx_inputs tx) @?= 3
-
   , testCase "spend_to_local fee underflow" $ do
       B5.spend_to_local
         dummyOutPoint (Satoshi 1)
@@ -676,18 +983,33 @@ spend_tests = testGroup "Spend" [
         dummyDestScript dummyFeerate
       @?= Nothing
 
-  , testCase "spend_revoked_batch fee underflow" $ do
-      let ro = B5.RevokedOutput
-            dummyOutPoint (Satoshi 1)
-            B5.RevokedToLocal
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro :| []
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      B5.spend_revoked_batch pctx @?= Nothing
+  , testCase "spend_to_local dust threshold by script" $ do
+      let fee = unSatoshi $ B5.spending_fee dummyFeerate
+            (B5.to_local_penalty_input_weight
+             + B5.penalty_tx_base_weight)
+          sweep dest v = B5.spend_to_local
+            dummyOutPoint (Satoshi v)
+            dummyRevocationPubkey dummyDelay
+            dummyLocalDelayedPubkey dest dummyFeerate
+          outValue = fmap
+            (txout_value . head' . tx_outputs . B5.stx_tx)
+          check (name, dest, dust) = do
+            assertEqual (name <> " at threshold") (Just dust)
+              (outValue (sweep dest (fee + dust)))
+            assertEqual (name <> " below threshold") Nothing
+              (sweep dest (fee + dust - 1))
+      mapM_ check
+        [ ("p2pkh", Script $ BS.pack ([0x76, 0xa9, 0x14]
+            <> replicate 20 0xCC <> [0x88, 0xac]), 546)
+        , ("p2sh", Script $ BS.pack ([0xa9, 0x14]
+            <> replicate 20 0xCC <> [0x87]), 540)
+        , ("p2wpkh", dummyDestScript, 294)
+        , ("p2wsh", Script $ BS.pack ([0x00, 0x20]
+            <> replicate 32 0xCC), 330)
+        , ("p2tr", Script $ BS.pack ([0x51, 0x20]
+            <> replicate 32 0xCC), 330)
+        ]
+
   ]
 
 -- htlc spend tests ---------------------------------------------------
@@ -718,8 +1040,7 @@ htlc_spend_tests = testGroup "HTLC Spend" [
       let ctx = dummyHTLCContext
             { hc_features = dummyFeaturesAnchors }
           stx = B5.spend_htlc_timeout ctx dummyKeys
-      B5.stx_sighash_type stx
-        @?= SIGHASH_SINGLE_ANYONECANPAY
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
 
   , testCase "spend_htlc_success anchors sighash" $ do
       let ctx = dummyHTLCContext
@@ -727,8 +1048,26 @@ htlc_spend_tests = testGroup "HTLC Spend" [
             , hc_features = dummyFeaturesAnchors
             }
           stx = B5.spend_htlc_success ctx dummyKeys
-      B5.stx_sighash_type stx
-        @?= SIGHASH_SINGLE_ANYONECANPAY
+      B5.stx_sighash_type stx @?= SIGHASH_ALL
+
+  , testCase "HTLC txs - Appendix F (anchors)" $ do
+      -- The local signature uses SIGHASH_ALL and the remote one
+      -- SIGHASH_SINGLE|SIGHASH_ANYONECANPAY.
+      commit <- assertJust "commitment" vecCommitAnchors
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) (ChannelFeatures True)
+            [vecHtlc0, vecHtlc1, vecHtlc2, vecHtlc3, vecHtlc4]
+          check uo vec = do
+            stx <- vecHtlcTx (FeeratePerKw 644) uo
+            assertHtlcTx stx vec
+            B5.stx_sighash_type stx @?= SIGHASH_ALL
+            assertSighashFlags stx SIGHASH_SINGLE_ANYONECANPAY vec
+      case drop 3 outs of
+        o3 : o4 : _ -> do
+          check o3 vecFHtlcTimeout2
+          check o4 vecFHtlcSuccess1
+        _ -> assertFailure "expected at least 5 outputs"
   ]
 
 -- remote spend tests -------------------------------------------------
@@ -884,6 +1223,53 @@ weight_tests = testGroup "Weight" [
       -- accepted: 164 + 249 = 413
       B5.accepted_htlc_penalty_input_weight @?=
         (164 + B5.accepted_htlc_penalty_witness_weight)
+      -- with anchors: 164 + 246 = 410, 164 + 252 = 416
+      B5.offered_htlc_penalty_input_weight_anchors @?=
+        (164 + B5.offered_htlc_penalty_witness_weight_anchors)
+      B5.accepted_htlc_penalty_input_weight_anchors @?=
+        (164 + B5.accepted_htlc_penalty_witness_weight_anchors)
+
+  , testCase "penalty witness weights match HTLC scripts" $ do
+      -- 1 (item count) + 1 + 73 (signature) + 1 + 33
+      -- (revocationpubkey) + 1 + script, for a 3-byte CLTV expiry
+      let witnessWeight script =
+            fromIntegral (110 + BS.length (unScript script))
+          offered = offered_htlc_script
+            dummyRevocationPubkey dummyRemoteHtlcPubkey
+            dummyLocalHtlcPubkey dummyPaymentHash
+          received = received_htlc_script
+            dummyRevocationPubkey dummyRemoteHtlcPubkey
+            dummyLocalHtlcPubkey dummyPaymentHash
+            (CltvExpiry 500000)
+      witnessWeight (offered dummyFeatures)
+        @?= B5.offered_htlc_penalty_witness_weight
+      witnessWeight (received dummyFeatures)
+        @?= B5.accepted_htlc_penalty_witness_weight
+      witnessWeight (offered dummyFeaturesAnchors)
+        @?= B5.offered_htlc_penalty_witness_weight_anchors
+      witnessWeight (received dummyFeaturesAnchors)
+        @?= B5.accepted_htlc_penalty_witness_weight_anchors
+
+  , testCase "spend_revoked_htlc weight by channel type" $ do
+      let value = 50000
+          outValue features htype = fmap
+            (txout_value . head' . tx_outputs . B5.stx_tx)
+            (B5.spend_revoked_htlc dummyOutPoint (Satoshi value)
+              htype dummyRevocationPubkey dummyKeys features
+              dummyPaymentHash dummyDestScript dummyFeerate)
+          expected inputWeight = Just $ value - unSatoshi
+            (B5.spending_fee dummyFeerate
+              (inputWeight + B5.penalty_tx_base_weight))
+          offered = B5.HTLCOfferedOutput (CltvExpiry 500000)
+          received = B5.HTLCReceivedOutput (CltvExpiry 500000)
+      outValue dummyFeatures offered
+        @?= expected B5.offered_htlc_penalty_input_weight
+      outValue dummyFeatures received
+        @?= expected B5.accepted_htlc_penalty_input_weight
+      outValue dummyFeaturesAnchors offered
+        @?= expected B5.offered_htlc_penalty_input_weight_anchors
+      outValue dummyFeaturesAnchors received
+        @?= expected B5.accepted_htlc_penalty_input_weight_anchors
 
   , testCase "max HTLCs in single penalty tx" $ do
       -- Per spec: (400000 - 324 - 272 - 212 - 2) / 413
@@ -930,6 +1316,42 @@ property_tests = testGroup "Properties" [
                in Satoshi outVal ==
                   Satoshi (unSatoshi value
                            - unSatoshi expectedFee)
+
+  , testProperty "sweeps never create dust outputs" $
+      forAll (choose (0, 3000 :: Int)) $ \v ->
+        let value = Satoshi (fromIntegral v)
+            sweeps =
+              [ B5.spend_to_local dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey dummyDestScript
+                  dummyFeerate
+              , B5.spend_remote_htlc_timeout dummyOutPoint value
+                  dummyHTLC dummyKeys dummyFeatures
+                  dummyDestScript dummyFeerate
+              , B5.spend_remote_htlc_preimage dummyOutPoint value
+                  dummyReceivedHTLC dummyKeys dummyFeatures
+                  dummyDestScript dummyFeerate
+              , B5.spend_revoked_to_local dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey dummyDestScript
+                  dummyFeerate
+              , B5.spend_revoked_htlc dummyOutPoint value
+                  (B5.HTLCOfferedOutput (CltvExpiry 500000))
+                  dummyRevocationPubkey dummyKeys dummyFeatures
+                  dummyPaymentHash dummyDestScript dummyFeerate
+              , B5.spend_revoked_htlc dummyOutPoint value
+                  (B5.HTLCReceivedOutput (CltvExpiry 500000))
+                  dummyRevocationPubkey dummyKeys dummyFeatures
+                  dummyPaymentHash dummyDestScript dummyFeerate
+              , B5.spend_revoked_htlc_output dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey dummyDestScript
+                  dummyFeerate
+              ]
+            notDust = maybe True $ \stx ->
+              txout_value (head' (tx_outputs (B5.stx_tx stx)))
+                >= 294
+        in all notDust sweeps
 
   , testProperty "htlc_timed_out monotonic" $
       \(NonNegative h1) (NonNegative h2) ->
@@ -1055,40 +1477,25 @@ property_tests = testGroup "Properties" [
               dummyOutPoint (Satoshi 1000)
               (B5.RevokedHTLC
                 (B5.HTLCReceivedOutput ce))
-        in  B5.revoked_output_weight roLocal
+            weight = B5.revoked_output_weight
+        in  weight dummyFeatures roLocal
             == B5.to_local_penalty_input_weight
             &&
-            B5.revoked_output_weight roOffered
+            weight dummyFeatures roOffered
             == B5.offered_htlc_penalty_input_weight
             &&
-            B5.revoked_output_weight roReceived
+            weight dummyFeatures roReceived
             == B5.accepted_htlc_penalty_input_weight
+            &&
+            weight dummyFeaturesAnchors roLocal
+            == B5.to_local_penalty_input_weight
+            &&
+            weight dummyFeaturesAnchors roOffered
+            == B5.offered_htlc_penalty_input_weight_anchors
+            &&
+            weight dummyFeaturesAnchors roReceived
+            == B5.accepted_htlc_penalty_input_weight_anchors
 
-  , testProperty "spend_revoked_batch input count" $
-      \(Positive n') ->
-        let n = min (n' :: Int) 5
-            ros = [ B5.RevokedOutput
-                      (OutPoint dummyTxId
-                        (fromIntegral i))
-                      (Satoshi 1000000)
-                      B5.RevokedToLocal
-                  | i <- [0..n-1] ]
-        in case ros of
-          [] -> True  -- impossible with Positive
-          (r:rs) ->
-            let pctx = B5.PenaltyContext
-                  { B5.pc_outputs = r :| rs
-                  , B5.pc_revocation_key =
-                      dummyRevocationPubkey
-                  , B5.pc_destination =
-                      dummyDestScript
-                  , B5.pc_feerate = FeeratePerKw 253
-                  }
-            in case B5.spend_revoked_batch pctx of
-              Nothing -> False
-              Just stx ->
-                length (tx_inputs (B5.stx_tx stx))
-                == n
   ]
 
 -- helpers ------------------------------------------------------------
