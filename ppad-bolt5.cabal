@@ -45,7 +45,7 @@ test-suite bolt5-tests
   main-is:             Main.hs
 
   ghc-options:
-    -rtsopts -Wall -O2
+    -rtsopts -Wall
 
   build-depends:
       base
