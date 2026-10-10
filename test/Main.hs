@@ -169,9 +169,9 @@ dummyLocalCommitWithHTLCs = CommitmentTx
           OutputToLocal
       , TxOutput (Satoshi 30000) dummyDestScript
           OutputToRemote
-      , TxOutput (Satoshi 10000) offeredScript
+      , TxOutput (Satoshi 1000) offeredScript
           (OutputOfferedHTLC (CltvExpiry 500000))
-      , TxOutput (Satoshi 10000) receivedScript
+      , TxOutput (Satoshi 1000) receivedScript
           (OutputReceivedHTLC (CltvExpiry 500000))
       ]
   , ctx_funding_script = dummyDestScript
@@ -337,6 +337,23 @@ vecCHtlcSuccess1 =
   \7bcea5afba3f3cdce23988527c21030d417a46946384f88d5f3337267c5e5797\
   \65875dc4daca813e21734b140639e752ae677502f501b175ac686800000000"
 
+-- | Appendix C: HTLC-timeout tx for htlc #6 from the same
+--   commitment (signed).
+vecCHtlcTimeout6 :: BS.ByteString
+vecCHtlcTimeout6 =
+  "020000000001014bdccf28653066a2c554cafeffdfe1e678e64a69b056684deb\
+  \0c4fba909423ec01000000000000000001e1120000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004830\
+  \45022100b575379f6d8743cb0087648f81cfd82d17a97fbf8f67e058c65ce8b9\
+  \d25df9500220554a210d65b02d9f36c6adf0f639430ca8293196ba5089bf67cc\
+  \3a9813b7b00a01483045022100ee2e16b90930a479b13f8823a7f14b600198c8\
+  \38161160b9436ed086d3fc57e002202a66fa2324f342a17129949c640bfe934c\
+  \bc73a869ba7c06aa25c5a3d0bfb53d01008576a91414011f7254d96b819c7698\
+  \6c277d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a\
+  \2184d88256816826d6231c068d4a5b7c820120876475527c21030d417a469463\
+  \84f88d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a91420\
+  \02cc93ebefbb1b73f0af055dcc27a0b504ad7688ac6868f9010000"
+
 -- | Appendix C: HTLC-timeout tx for htlc #5 from the same
 --   commitment (signed).
 vecCHtlcTimeout5 :: BS.ByteString
@@ -391,6 +408,38 @@ offeredClaimParts = do
   case items of
     [_, sig, _, _, script] -> pure (sig, script)
     _ -> assertFailure "unexpected HTLC-timeout witness"
+
+-- | Build the HTLC tx for an HTLC output of an Appendix C/F
+--   commitment (to_self_delay 144).
+vecHtlcTx :: FeeratePerKw -> B5.UnresolvedOutput -> IO B5.SpendingTx
+vecHtlcTx feerate uo = case B5.uo_type uo of
+  B5.SpendHTLCTimeout htlc keys features ->
+    pure (B5.spend_htlc_timeout (ctx htlc keys features) keys)
+  B5.SpendHTLCSuccess htlc keys features ->
+    pure (B5.spend_htlc_success (ctx htlc keys features) keys)
+  other -> assertFailure ("expected an HTLC output, got " <> show other)
+  where
+    ctx htlc keys features = HTLCContext
+      { hc_commitment_txid = op_txid (B5.uo_outpoint uo)
+      , hc_output_index = op_vout (B5.uo_outpoint uo)
+      , hc_htlc = htlc
+      , hc_to_self_delay = ToSelfDelay 144
+      , hc_feerate = feerate
+      , hc_features = features
+      , hc_revocation_pubkey = ck_revocation_pubkey keys
+      , hc_local_delayed = ck_local_delayed keys
+      }
+
+-- | Check an HTLC tx against a signed BOLT #3 vector: the unsigned
+--   tx and the witness script must match.
+assertHtlcTx :: B5.SpendingTx -> BS.ByteString -> Assertion
+assertHtlcTx stx vec = do
+  tx <- parseTx vec
+  items <- singleWitness tx
+  B5.stx_tx stx @?= tx { tx_witnesses = [] }
+  case reverse items of
+    script : _ -> B5.stx_input_script stx @?= Script script
+    [] -> assertFailure "empty witness"
 
 -- types tests --------------------------------------------------------
 
@@ -582,10 +631,10 @@ classify_tests = testGroup "Classify" [
             , ctx_outputs =
                 [ TxOutput (Satoshi 50000) toLocalScript
                     OutputToLocal
-                , TxOutput (Satoshi 10000) offeredScript
+                , TxOutput (Satoshi 1000) offeredScript
                     (OutputOfferedHTLC
                       (CltvExpiry 500000))
-                , TxOutput (Satoshi 10000) receivedScript
+                , TxOutput (Satoshi 1000) receivedScript
                     (OutputReceivedHTLC
                       (CltvExpiry 500000))
                 ]
@@ -704,6 +753,79 @@ classify_tests = testGroup "Classify" [
         emptyCommit dummyKeys dummyDelay
         dummyFeatures []
       @?= []
+
+  , testCase "classify_local - HTLCs sharing a payment hash" $ do
+      -- Appendix C: htlcs #5 and #6 share a payment hash and amount
+      -- (5000 sat) and differ only in CLTV expiry (506 and 505).
+      commit <- assertJust "commitment" vecCommitSameHash
+      keys <- assertJust "keys" vecKeys
+      let features = ChannelFeatures False
+          outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) features
+            [vecHtlc1, vecHtlc5, vecHtlc6]
+      map B5.uo_type (take 3 outs) @?=
+        [ B5.SpendHTLCSuccess vecHtlc1 keys features
+        , B5.SpendHTLCTimeout vecHtlc6 keys features
+        , B5.SpendHTLCTimeout vecHtlc5 keys features
+        ]
+
+  , testCase "HTLC txs - Appendix C, shared payment hash" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) (ChannelFeatures False)
+            [vecHtlc1, vecHtlc5, vecHtlc6]
+      case outs of
+        o0 : o1 : o2 : _ -> do
+          stx0 <- vecHtlcTx (FeeratePerKw 253) o0
+          assertHtlcTx stx0 vecCHtlcSuccess1
+          stx1 <- vecHtlcTx (FeeratePerKw 253) o1
+          assertHtlcTx stx1 vecCHtlcTimeout6
+          stx2 <- vecHtlcTx (FeeratePerKw 253) o2
+          assertHtlcTx stx2 vecCHtlcTimeout5
+        _ -> assertFailure "expected at least 3 outputs"
+
+  , testCase "classify_remote - HTLCs sharing a payment hash" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_remote_commit_outputs commit keys
+            (ChannelFeatures False)
+            [vecHtlc1, vecHtlc5, vecHtlc6]
+      map B5.uo_type (take 3 outs) @?=
+        [ B5.SpendHTLCTimeoutDirect vecHtlc1
+        , B5.SpendHTLCPreimageDirect vecHtlc6
+        , B5.SpendHTLCPreimageDirect vecHtlc5
+        ]
+
+  , testCase "classify_local - HTLCs differing only in amount" $ do
+      let hA = vecHtlc HTLCOffered 5000000 600 0x07
+          hB = vecHtlc HTLCOffered 9000000 600 0x07
+          features = ChannelFeatures False
+      commit <- assertJust "commitment" $ vecCommitment
+        (FeeratePerKw 253) features (MilliSatoshi 6000000000)
+        [hA, hB]
+      keys <- assertJust "keys" vecKeys
+      let outs = B5.classify_local_commit_outputs commit keys
+            (ToSelfDelay 144) features [hB, hA]
+      [ (B5.uo_value o, h)
+        | o <- outs
+        , B5.SpendHTLCTimeout h _ _ <- [B5.uo_type o] ]
+        @?= [(Satoshi 5000, hA), (Satoshi 9000, hB)]
+
+  , testCase "classify_local - each HTLC matches one output" $ do
+      let h = vecHtlc HTLCOffered 5000000 600 0x07
+          features = ChannelFeatures False
+      commit <- assertJust "commitment" $ vecCommitment
+        (FeeratePerKw 253) features (MilliSatoshi 6000000000)
+        [h, h]
+      keys <- assertJust "keys" vecKeys
+      let timeouts hs = length
+            [ ()
+            | o <- B5.classify_local_commit_outputs commit keys
+                     (ToSelfDelay 144) features hs
+            , B5.SpendHTLCTimeout {} <- [B5.uo_type o] ]
+      timeouts [h] @?= 1
+      timeouts [h, h] @?= 2
   ]
 
 -- spend tests --------------------------------------------------------
