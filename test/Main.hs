@@ -7,8 +7,10 @@ import Bitcoin.Prim.Tx (TxOut(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Word (Word8)
 import Lightning.Protocol.BOLT3 hiding
   (txout_value, txout_script)
+import Lightning.Protocol.BOLT3.Types (Pubkey(..), PaymentHash(..))
 import qualified Lightning.Protocol.BOLT5 as B5
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -29,11 +31,6 @@ main = defaultMain $ testGroup "ppad-bolt5" [
 
 -- test fixtures ------------------------------------------------------
 
--- Dummy 33-byte pubkey
-dummyPubkeyBytes :: BS.ByteString
-dummyPubkeyBytes = BS.pack $
-  0x02 : replicate 32 0x01
-
 -- Dummy 32-byte hash
 dummyHash32 :: BS.ByteString
 dummyHash32 = BS.replicate 32 0xAA
@@ -43,37 +40,33 @@ dummyPreimage :: BS.ByteString
 dummyPreimage = BS.replicate 32 0xBB
 
 dummyTxId :: TxId
-dummyTxId = case mkTxId (BS.replicate 32 0x00) of
-  Just tid -> tid
-  Nothing  -> error "impossible"
+dummyTxId = TxId (BS.replicate 32 0x00)
 
 dummyOutPoint :: OutPoint
 dummyOutPoint = OutPoint dummyTxId 0
 
-dummyPubkey :: Pubkey
-dummyPubkey = case pubkey dummyPubkeyBytes of
-  Just pk -> pk
-  Nothing -> error "impossible"
+-- Dummy 33-byte pubkey. Each role gets its own key, so a key used
+-- in the wrong role changes the script.
+mkPubkey :: Word8 -> Pubkey
+mkPubkey b = Pubkey (BS.pack (0x02 : replicate 32 b))
 
 dummyRevocationPubkey :: RevocationPubkey
-dummyRevocationPubkey = RevocationPubkey dummyPubkey
+dummyRevocationPubkey = RevocationPubkey (mkPubkey 0x01)
 
 dummyLocalDelayedPubkey :: LocalDelayedPubkey
-dummyLocalDelayedPubkey = LocalDelayedPubkey dummyPubkey
+dummyLocalDelayedPubkey = LocalDelayedPubkey (mkPubkey 0x02)
 
 dummyLocalHtlcPubkey :: LocalHtlcPubkey
-dummyLocalHtlcPubkey = LocalHtlcPubkey dummyPubkey
+dummyLocalHtlcPubkey = LocalHtlcPubkey (mkPubkey 0x03)
 
 dummyRemoteHtlcPubkey :: RemoteHtlcPubkey
-dummyRemoteHtlcPubkey = RemoteHtlcPubkey dummyPubkey
+dummyRemoteHtlcPubkey = RemoteHtlcPubkey (mkPubkey 0x04)
 
 dummyFundingPubkey :: FundingPubkey
-dummyFundingPubkey = FundingPubkey dummyPubkey
+dummyFundingPubkey = FundingPubkey (mkPubkey 0x07)
 
 dummyPaymentHash :: PaymentHash
-dummyPaymentHash = case paymentHash dummyHash32 of
-  Just ph -> ph
-  Nothing -> error "impossible"
+dummyPaymentHash = PaymentHash dummyHash32
 
 dummyDelay :: ToSelfDelay
 dummyDelay = ToSelfDelay 144
@@ -97,10 +90,10 @@ dummyKeys = CommitmentKeys
   , ck_local_delayed = dummyLocalDelayedPubkey
   , ck_local_htlc = dummyLocalHtlcPubkey
   , ck_remote_htlc = dummyRemoteHtlcPubkey
-  , ck_local_payment = LocalPubkey dummyPubkey
-  , ck_remote_payment = RemotePubkey dummyPubkey
+  , ck_local_payment = LocalPubkey (mkPubkey 0x05)
+  , ck_remote_payment = RemotePubkey (mkPubkey 0x06)
   , ck_local_funding = dummyFundingPubkey
-  , ck_remote_funding = dummyFundingPubkey
+  , ck_remote_funding = FundingPubkey (mkPubkey 0x08)
   }
 
 dummyHTLC :: HTLC
