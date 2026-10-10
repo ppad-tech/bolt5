@@ -8,7 +8,7 @@ import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Word (Word8)
+import Data.Word (Word8, Word32, Word64)
 import Lightning.Protocol.BOLT3 hiding
   (txout_value, txout_script)
 import Lightning.Protocol.BOLT3.Types (Pubkey(..), PaymentHash(..))
@@ -200,6 +200,125 @@ dummyRemoteCommitTx = CommitmentTx
 vecPaymentHash :: Word8 -> PaymentHash
 vecPaymentHash b = PaymentHash (SHA256.hash (BS.replicate 32 b))
 
+-- | Decode a hex string.
+unhex :: BS.ByteString -> Maybe BS.ByteString
+unhex bs
+  | odd (BS.length bs) = Nothing
+  | otherwise = BS.pack <$> go (BS.unpack bs)
+  where
+    go (a:b:rest) = (:) <$> byte a b <*> go rest
+    go _ = Just []
+    byte a b = (\hi lo -> hi * 16 + lo) <$> nibble a <*> nibble b
+    nibble c
+      | c >= 0x30 && c <= 0x39 = Just (c - 0x30)
+      | c >= 0x61 && c <= 0x66 = Just (c - 0x57)
+      | otherwise = Nothing
+
+-- | An Appendix C HTLC, given its direction, amount (msat), expiry
+--   and preimage byte.
+vecHtlc :: HTLCDirection -> Word64 -> Word32 -> Word8 -> HTLC
+vecHtlc dir msat expiry b = HTLC
+  { htlc_direction = dir
+  , htlc_amount_msat = MilliSatoshi msat
+  , htlc_payment_hash = vecPaymentHash b
+  , htlc_cltv_expiry = CltvExpiry expiry
+  }
+
+vecHtlc1, vecHtlc5, vecHtlc6 :: HTLC
+vecHtlc1 = vecHtlc HTLCReceived 2000000 501 0x01
+vecHtlc5 = vecHtlc HTLCOffered 5000000 506 0x05
+vecHtlc6 = vecHtlc HTLCOffered 5000001 505 0x05
+
+-- | Appendix C keys for the local commitment (Appendix F uses the
+--   same keys).
+vecKeys :: Maybe CommitmentKeys
+vecKeys = do
+  rev <- key
+    "0212a140cd0c6539d07cd08dfe09984dec3251ea808b892efeac3ede9402bf2b19"
+  delayed <- key
+    "03fd5960528dc152014952efdb702a88f71e3c1653b2314431701ec77e57fde83c"
+  localHtlc <- key
+    "030d417a46946384f88d5f3337267c5e579765875dc4daca813e21734b140639e7"
+  remoteHtlc <- key
+    "0394854aa6eab5b2a8122cc726e9dded053a2184d88256816826d6231c068d4a5b"
+  localPayment <- key
+    "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+  remotePayment <- key
+    "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991"
+  localFunding <- key
+    "023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"
+  remoteFunding <- key
+    "030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"
+  pure CommitmentKeys
+    { ck_revocation_pubkey = RevocationPubkey rev
+    , ck_local_delayed = LocalDelayedPubkey delayed
+    , ck_local_htlc = LocalHtlcPubkey localHtlc
+    , ck_remote_htlc = RemoteHtlcPubkey remoteHtlc
+    , ck_local_payment = LocalPubkey localPayment
+    , ck_remote_payment = RemotePubkey remotePayment
+    , ck_local_funding = FundingPubkey localFunding
+    , ck_remote_funding = FundingPubkey remoteFunding
+    }
+  where
+    key h = unhex h >>= pubkey
+
+-- | Rebuild an Appendix C/F local commitment with bolt3, given the
+--   feerate, channel features, to_local balance and HTLCs.
+vecCommitment
+  :: FeeratePerKw -> ChannelFeatures -> MilliSatoshi -> [HTLC]
+  -> Maybe CommitmentTx
+vecCommitment feerate features toLocal htlcs = do
+  keys <- vecKeys
+  fundingTxid <- mkTxId =<< unhex
+    "bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489"
+  cn <- commitment_number 42
+  localBp <- point =<< unhex
+    "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+  remoteBp <- point =<< unhex
+    "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991"
+  pure $ build_commitment_tx CommitmentContext
+    { cc_funding_outpoint = OutPoint fundingTxid 0
+    , cc_commitment_number = cn
+    , cc_local_payment_bp = PaymentBasepoint localBp
+    , cc_remote_payment_bp = PaymentBasepoint remoteBp
+    , cc_to_self_delay = ToSelfDelay 144
+    , cc_dust_limit = DustLimit (Satoshi 546)
+    , cc_feerate = feerate
+    , cc_features = features
+    , cc_is_funder = True
+    , cc_to_local_msat = toLocal
+    , cc_to_remote_msat = MilliSatoshi 3000000000
+    , cc_htlcs = htlcs
+    , cc_keys = keys
+    }
+
+-- | The Appendix C commitment with two offered HTLCs sharing a
+--   payment hash and amount.
+vecCommitSameHash :: Maybe CommitmentTx
+vecCommitSameHash = vecCommitment (FeeratePerKw 253)
+  (ChannelFeatures False) (MilliSatoshi 6987999999)
+  [vecHtlc1, vecHtlc5, vecHtlc6]
+
+-- | Appendix C: commitment tx with 3 htlc outputs, 2 offered
+--   having the same amount and preimage (signed).
+vecCCommitSameHash :: BS.ByteString
+vecCCommitSameHash =
+  "02000000000101bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b\
+  \820b584a488489000000000038b02b8005d007000000000000220020748eba94\
+  \4fedc8827f6b06bc44678f93c0f9e6078b35c6331ed31e75f8ce0c2d88130000\
+  \00000000220020305c12e1a0bc21e283c131cea1c66d68857d28b7b2fce0a6fb\
+  \c40c164852121b8813000000000000220020305c12e1a0bc21e283c131cea1c6\
+  \6d68857d28b7b2fce0a6fbc40c164852121bc0c62d0000000000160014cc1b07\
+  \838e387deacd0e5232e1e8b49f4c29e484a69f6a00000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e04004730\
+  \4402200d10bf5bc5397fc59d7188ae438d80c77575595a2d488e41bd6363a810\
+  \cc8d72022012b57e714fbbfdf7a28c47d5b370cb8ac37c8545f596216e5b21e9\
+  \b236ef457c0147304402207d0870964530f97b62497b11153c551dca0a1e2268\
+  \15ef0a336651158da0f82402200f5378beee0e77759147b8a0a284decd11bfd2\
+  \bc55c8fafa41c134fe996d43c801475221023da092f6980e58d2c037173180e9\
+  \a465476026ee50f96695963e8efe436f54eb21030e9f7b623d2ccc7c9bd44d66\
+  \d5ce21ce504c0acf6385a132cec6d3c39fa711c152ae3e195220"
+
 -- | Appendix C: HTLC-success tx for htlc #1 from the same
 --   commitment (signed).
 vecCHtlcSuccess1 :: BS.ByteString
@@ -386,27 +505,31 @@ detect_tests = testGroup "Detect" [
 
 classify_tests :: TestTree
 classify_tests = testGroup "Classify" [
-    testCase "identify_close - local commit" $ do
-      case encode_tx_for_signing dummyLocalCommitTx of
-        Nothing -> assertFailure "encode failed"
-        Just localBytes ->
-          B5.identify_close
-            dummyLocalCommitTx
-            dummyRemoteCommitTx
-            localBytes
-          @?= Just B5.LocalCommitClose
+    testCase "identify_close - signed local commitment" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      signed <- assertJust "hex" (unhex vecCCommitSameHash)
+      B5.identify_close commit dummyRemoteCommitTx signed
+        @?= Just B5.LocalCommitClose
 
-  , testCase "identify_close - remote commit" $ do
-      case encode_tx_for_signing dummyRemoteCommitTx of
-        Nothing -> assertFailure "encode failed"
-        Just remoteBytes ->
-          B5.identify_close
-            dummyLocalCommitTx
-            dummyRemoteCommitTx
-            remoteBytes
-          @?= Just B5.RemoteCommitClose
+  , testCase "identify_close - signed remote commitment" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      signed <- assertJust "hex" (unhex vecCCommitSameHash)
+      B5.identify_close dummyLocalCommitTx commit signed
+        @?= Just B5.RemoteCommitClose
+
+  , testCase "identify_close - unsigned commitment" $ do
+      commit <- assertJust "commitment" vecCommitSameHash
+      unsigned <- assertJust "encode" (encode_tx_for_signing commit)
+      B5.identify_close commit dummyRemoteCommitTx unsigned
+        @?= Just B5.LocalCommitClose
 
   , testCase "identify_close - no match" $ do
+      signed <- assertJust "hex" (unhex vecCCommitSameHash)
+      B5.identify_close
+        dummyLocalCommitTx dummyRemoteCommitTx signed
+        @?= Nothing
+
+  , testCase "identify_close - unparseable" $ do
       B5.identify_close
         dummyLocalCommitTx
         dummyRemoteCommitTx

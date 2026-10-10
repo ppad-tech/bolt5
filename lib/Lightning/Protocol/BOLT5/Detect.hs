@@ -39,16 +39,17 @@ import Lightning.Protocol.BOLT5.Types
 -- | Identify the type of channel close from a transaction that
 --   spends the funding output.
 --
--- Compares the on-chain transaction bytes against the known
--- local and remote commitment transaction serializations
--- (stripped/unsigned) to determine whether it's a local or
--- remote commitment close.
+-- Parses the on-chain transaction and compares its txid against
+-- the txids of the known local and remote commitment
+-- transactions. Comparing txids rather than bytes means the
+-- signed (segwit) serialization found on chain matches the
+-- unsigned commitment.
 --
--- Returns 'Nothing' if the transaction doesn't match either
--- commitment. Mutual close and revoked commitment detection
--- require additional checks by the caller (e.g. comparing
--- closing tx format, checking a secret store for older
--- commitment numbers).
+-- Returns 'Nothing' if the bytes don't parse as a transaction or
+-- the transaction doesn't match either commitment. Mutual close
+-- and revoked commitment detection require additional checks by
+-- the caller (e.g. comparing closing tx format, checking a secret
+-- store for older commitment numbers).
 identify_close
   :: CommitmentTx
   -- ^ Our local commitment tx.
@@ -59,13 +60,15 @@ identify_close
   -> Maybe CloseType
 identify_close !localCommitTx !remoteCommitTx
     !onChainBytes =
-    let !localBytes = encode_tx_for_signing localCommitTx
-        !remoteBytes = encode_tx_for_signing remoteCommitTx
-    in  if localBytes == Just onChainBytes
-        then Just LocalCommitClose
-        else if remoteBytes == Just onChainBytes
-        then Just RemoteCommitClose
-        else Nothing
+  case BT.from_bytes onChainBytes of
+    Nothing -> Nothing
+    Just !onChainTx ->
+      let !onChainTxid = Just (BT.txid onChainTx)
+      in  if commitment_txid localCommitTx == onChainTxid
+          then Just LocalCommitClose
+          else if commitment_txid remoteCommitTx == onChainTxid
+          then Just RemoteCommitClose
+          else Nothing
 
 -- output classification ----------------------------------------------
 
