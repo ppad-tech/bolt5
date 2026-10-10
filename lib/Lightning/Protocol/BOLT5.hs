@@ -69,9 +69,13 @@ module Lightning.Protocol.BOLT5 (
   , to_local_penalty_witness_weight
   , offered_htlc_penalty_witness_weight
   , accepted_htlc_penalty_witness_weight
+  , offered_htlc_penalty_witness_weight_anchors
+  , accepted_htlc_penalty_witness_weight_anchors
   , to_local_penalty_input_weight
   , offered_htlc_penalty_input_weight
   , accepted_htlc_penalty_input_weight
+  , offered_htlc_penalty_input_weight_anchors
+  , accepted_htlc_penalty_input_weight_anchors
   , to_remote_input_weight
   , penalty_tx_base_weight
   , max_standard_weight

@@ -35,9 +35,13 @@ module Lightning.Protocol.BOLT5.Types (
   , to_local_penalty_witness_weight
   , offered_htlc_penalty_witness_weight
   , accepted_htlc_penalty_witness_weight
+  , offered_htlc_penalty_witness_weight_anchors
+  , accepted_htlc_penalty_witness_weight_anchors
   , to_local_penalty_input_weight
   , offered_htlc_penalty_input_weight
   , accepted_htlc_penalty_input_weight
+  , offered_htlc_penalty_input_weight_anchors
+  , accepted_htlc_penalty_input_weight_anchors
   , to_remote_input_weight
   , penalty_tx_base_weight
   , max_standard_weight
@@ -139,11 +143,13 @@ htlcOutputType _ = Nothing
 {-# INLINE htlcOutputType #-}
 
 -- | Penalty input weight for an HTLC output type.
-htlcOutputTypeWeight :: HTLCOutputType -> Word64
-htlcOutputTypeWeight (HTLCOfferedOutput _) =
-  offered_htlc_penalty_input_weight
-htlcOutputTypeWeight (HTLCReceivedOutput _) =
-  accepted_htlc_penalty_input_weight
+htlcOutputTypeWeight :: ChannelFeatures -> HTLCOutputType -> Word64
+htlcOutputTypeWeight !features (HTLCOfferedOutput _)
+  | has_anchors features = offered_htlc_penalty_input_weight_anchors
+  | otherwise = offered_htlc_penalty_input_weight
+htlcOutputTypeWeight !features (HTLCReceivedOutput _)
+  | has_anchors features = accepted_htlc_penalty_input_weight_anchors
+  | otherwise = accepted_htlc_penalty_input_weight
 {-# INLINE htlcOutputTypeWeight #-}
 
 -- spending transactions ----------------------------------------------
@@ -186,12 +192,12 @@ data RevokedOutputType
   deriving (Eq, Show, Generic)
 
 -- | Penalty input weight for a revoked output.
-revoked_output_weight :: RevokedOutput -> Word64
-revoked_output_weight !ro = case ro_type ro of
+revoked_output_weight :: ChannelFeatures -> RevokedOutput -> Word64
+revoked_output_weight !features !ro = case ro_type ro of
   RevokedToLocal ->
     to_local_penalty_input_weight
   RevokedHTLC !htype ->
-    htlcOutputTypeWeight htype
+    htlcOutputTypeWeight features htype
 {-# INLINE revoked_output_weight #-}
 
 -- weight constants (BOLT #5 Appendix A) ------------------------------
@@ -202,14 +208,28 @@ to_local_penalty_witness_weight :: Word64
 to_local_penalty_witness_weight = 160
 
 -- | Expected weight of the offered_htlc penalty transaction
---   witness (243 bytes).
+--   witness (243 bytes), for a 133-byte witness script (no
+--   option_anchors).
 offered_htlc_penalty_witness_weight :: Word64
 offered_htlc_penalty_witness_weight = 243
 
 -- | Expected weight of the accepted_htlc penalty transaction
---   witness (249 bytes).
+--   witness (249 bytes), for a 139-byte witness script (no
+--   option_anchors).
 accepted_htlc_penalty_witness_weight :: Word64
 accepted_htlc_penalty_witness_weight = 249
+
+-- | Expected weight of the offered_htlc penalty transaction
+--   witness with option_anchors (246 bytes), whose witness script
+--   is 136 bytes.
+offered_htlc_penalty_witness_weight_anchors :: Word64
+offered_htlc_penalty_witness_weight_anchors = 246
+
+-- | Expected weight of the accepted_htlc penalty transaction
+--   witness with option_anchors (252 bytes), whose witness script
+--   is 142 bytes.
+accepted_htlc_penalty_witness_weight_anchors :: Word64
+accepted_htlc_penalty_witness_weight_anchors = 252
 
 -- | Weight of a to_local penalty input (164 + 160 = 324 bytes).
 to_local_penalty_input_weight :: Word64
@@ -224,6 +244,16 @@ offered_htlc_penalty_input_weight = 407
 --   (164 + 249 = 413 bytes).
 accepted_htlc_penalty_input_weight :: Word64
 accepted_htlc_penalty_input_weight = 413
+
+-- | Weight of an offered_htlc penalty input with option_anchors
+--   (164 + 246 = 410 bytes).
+offered_htlc_penalty_input_weight_anchors :: Word64
+offered_htlc_penalty_input_weight_anchors = 410
+
+-- | Weight of an accepted_htlc penalty input with option_anchors
+--   (164 + 252 = 416 bytes).
+accepted_htlc_penalty_input_weight_anchors :: Word64
+accepted_htlc_penalty_input_weight_anchors = 416
 
 -- | Weight of a to_remote P2WPKH input
 --   (108 + 164 = 272 bytes).

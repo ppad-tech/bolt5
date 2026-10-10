@@ -204,7 +204,8 @@ spend_remote_htlc_timeout !op !value !htlc !keys
         (htlc_payment_hash htlc)
         (htlc_cltv_expiry htlc)
         features
-      !weight = accepted_htlc_penalty_input_weight
+      !weight = htlcOutputTypeWeight features
+                  (HTLCReceivedOutput (htlc_cltv_expiry htlc))
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
   in case sweep_value value fee destScript of
@@ -249,7 +250,8 @@ spend_remote_htlc_preimage !op !value !htlc !keys
         (ck_local_htlc keys)
         (htlc_payment_hash htlc)
         features
-      !weight = offered_htlc_penalty_input_weight
+      !weight = htlcOutputTypeWeight features
+                  (HTLCOfferedOutput (htlc_cltv_expiry htlc))
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
   in case sweep_value value fee destScript of
@@ -332,7 +334,7 @@ spend_revoked_htlc !op !value !htype !revpk !keys
             (ck_local_htlc keys)
             ph
             features
-          !weight = offered_htlc_penalty_input_weight
+          !weight = htlcOutputTypeWeight features htype
                   + penalty_tx_base_weight
           !fee = spending_fee feerate weight
       in case sweep_value value fee destScript of
@@ -350,7 +352,7 @@ spend_revoked_htlc !op !value !htype !revpk !keys
             ph
             expiry
             features
-          !weight = accepted_htlc_penalty_input_weight
+          !weight = htlcOutputTypeWeight features htype
                   + penalty_tx_base_weight
           !fee = spending_fee feerate weight
       in case sweep_value value fee destScript of

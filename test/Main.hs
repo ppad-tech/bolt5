@@ -511,6 +511,8 @@ types_tests = testGroup "Types" [
       B5.to_local_penalty_input_weight @?= 324
       B5.offered_htlc_penalty_input_weight @?= 407
       B5.accepted_htlc_penalty_input_weight @?= 413
+      B5.offered_htlc_penalty_input_weight_anchors @?= 410
+      B5.accepted_htlc_penalty_input_weight_anchors @?= 416
       B5.to_remote_input_weight @?= 272
       B5.max_standard_weight @?= 400000
   ]
@@ -1221,6 +1223,53 @@ weight_tests = testGroup "Weight" [
       -- accepted: 164 + 249 = 413
       B5.accepted_htlc_penalty_input_weight @?=
         (164 + B5.accepted_htlc_penalty_witness_weight)
+      -- with anchors: 164 + 246 = 410, 164 + 252 = 416
+      B5.offered_htlc_penalty_input_weight_anchors @?=
+        (164 + B5.offered_htlc_penalty_witness_weight_anchors)
+      B5.accepted_htlc_penalty_input_weight_anchors @?=
+        (164 + B5.accepted_htlc_penalty_witness_weight_anchors)
+
+  , testCase "penalty witness weights match HTLC scripts" $ do
+      -- 1 (item count) + 1 + 73 (signature) + 1 + 33
+      -- (revocationpubkey) + 1 + script, for a 3-byte CLTV expiry
+      let witnessWeight script =
+            fromIntegral (110 + BS.length (unScript script))
+          offered = offered_htlc_script
+            dummyRevocationPubkey dummyRemoteHtlcPubkey
+            dummyLocalHtlcPubkey dummyPaymentHash
+          received = received_htlc_script
+            dummyRevocationPubkey dummyRemoteHtlcPubkey
+            dummyLocalHtlcPubkey dummyPaymentHash
+            (CltvExpiry 500000)
+      witnessWeight (offered dummyFeatures)
+        @?= B5.offered_htlc_penalty_witness_weight
+      witnessWeight (received dummyFeatures)
+        @?= B5.accepted_htlc_penalty_witness_weight
+      witnessWeight (offered dummyFeaturesAnchors)
+        @?= B5.offered_htlc_penalty_witness_weight_anchors
+      witnessWeight (received dummyFeaturesAnchors)
+        @?= B5.accepted_htlc_penalty_witness_weight_anchors
+
+  , testCase "spend_revoked_htlc weight by channel type" $ do
+      let value = 50000
+          outValue features htype = fmap
+            (txout_value . head' . tx_outputs . B5.stx_tx)
+            (B5.spend_revoked_htlc dummyOutPoint (Satoshi value)
+              htype dummyRevocationPubkey dummyKeys features
+              dummyPaymentHash dummyDestScript dummyFeerate)
+          expected inputWeight = Just $ value - unSatoshi
+            (B5.spending_fee dummyFeerate
+              (inputWeight + B5.penalty_tx_base_weight))
+          offered = B5.HTLCOfferedOutput (CltvExpiry 500000)
+          received = B5.HTLCReceivedOutput (CltvExpiry 500000)
+      outValue dummyFeatures offered
+        @?= expected B5.offered_htlc_penalty_input_weight
+      outValue dummyFeatures received
+        @?= expected B5.accepted_htlc_penalty_input_weight
+      outValue dummyFeaturesAnchors offered
+        @?= expected B5.offered_htlc_penalty_input_weight_anchors
+      outValue dummyFeaturesAnchors received
+        @?= expected B5.accepted_htlc_penalty_input_weight_anchors
 
   , testCase "max HTLCs in single penalty tx" $ do
       -- Per spec: (400000 - 324 - 272 - 212 - 2) / 413
@@ -1428,14 +1477,24 @@ property_tests = testGroup "Properties" [
               dummyOutPoint (Satoshi 1000)
               (B5.RevokedHTLC
                 (B5.HTLCReceivedOutput ce))
-        in  B5.revoked_output_weight roLocal
+            weight = B5.revoked_output_weight
+        in  weight dummyFeatures roLocal
             == B5.to_local_penalty_input_weight
             &&
-            B5.revoked_output_weight roOffered
+            weight dummyFeatures roOffered
             == B5.offered_htlc_penalty_input_weight
             &&
-            B5.revoked_output_weight roReceived
+            weight dummyFeatures roReceived
             == B5.accepted_htlc_penalty_input_weight
+            &&
+            weight dummyFeaturesAnchors roLocal
+            == B5.to_local_penalty_input_weight
+            &&
+            weight dummyFeaturesAnchors roOffered
+            == B5.offered_htlc_penalty_input_weight_anchors
+            &&
+            weight dummyFeaturesAnchors roReceived
+            == B5.accepted_htlc_penalty_input_weight_anchors
 
   ]
 
