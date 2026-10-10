@@ -1,121 +1,50 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-
 module Main where
 
-import Bitcoin.Prim.Tx.Sighash (SighashType(..))
-import Control.DeepSeq (NFData(..))
-import qualified Data.ByteString as BS
-import Lightning.Protocol.BOLT3 hiding
-  (txout_value, txout_script)
+import Fixtures
+import Lightning.Protocol.BOLT3
 import qualified Lightning.Protocol.BOLT5 as B5
 import Weigh
 
--- NFData orphan instances for weigh ---------------------------------
-
-instance NFData Script where
-  rnf (Script bs) = rnf bs
-
-instance NFData Pubkey where
-  rnf pk = rnf (unPubkey pk)
-
-instance NFData RevocationPubkey where
-  rnf (RevocationPubkey x) = rnf x
-
-instance NFData LocalDelayedPubkey where
-  rnf (LocalDelayedPubkey p) = rnf p
-
-instance NFData FundingPubkey where
-  rnf (FundingPubkey p) = rnf p
-
-instance NFData FeeratePerKw where
-  rnf (FeeratePerKw x) = rnf x
-
-instance NFData ToSelfDelay where
-  rnf (ToSelfDelay x) = rnf x
-
-instance NFData CltvExpiry where
-  rnf (CltvExpiry x) = rnf x
-
-instance NFData SighashType
-
-instance NFData B5.OutputResolution where
-  rnf B5.Resolved = ()
-  rnf (B5.Revoke rk) = rnf rk
-  rnf _ = ()
-
-instance NFData B5.HTLCOutputType where
-  rnf (B5.HTLCOfferedOutput e) = rnf e
-  rnf (B5.HTLCReceivedOutput e) = rnf e
-
-instance NFData B5.UnresolvedOutput where
-  rnf (B5.UnresolvedOutput op v t) =
-    rnf op `seq` rnf v `seq` rnf t
-
-instance NFData B5.RevokedOutputType where
-  rnf B5.RevokedToLocal = ()
-  rnf (B5.RevokedHTLC h) = rnf h
-
-instance NFData B5.RevokedOutput where
-  rnf (B5.RevokedOutput op v t) =
-    rnf op `seq` rnf v `seq` rnf t
-
-instance NFData B5.SpendingTx where
-  rnf (B5.SpendingTx tx scr val sh) =
-    rnf tx `seq` rnf scr `seq` rnf val `seq` rnf sh
-
 -- note that 'weigh' doesn't work properly in a repl
 main :: IO ()
-main = mainWith $ do
-  spend_weights
-
--- fixtures -----------------------------------------------------------
-
-dummyPubkey :: Pubkey
-dummyPubkey = case pubkey (BS.pack (0x02 : replicate 32 0x01)) of
-  Just pk -> pk
-  Nothing -> error "impossible"
-
-dummyTxId :: TxId
-dummyTxId = case mkTxId (BS.replicate 32 0x00) of
-  Just tid -> tid
-  Nothing  -> error "impossible"
-
-dummyOutPoint :: OutPoint
-dummyOutPoint = OutPoint dummyTxId 0
-
-dummyRevPk :: RevocationPubkey
-dummyRevPk = RevocationPubkey dummyPubkey
-
-dummyDelayedPk :: LocalDelayedPubkey
-dummyDelayedPk = LocalDelayedPubkey dummyPubkey
-
-dummyFundPk :: FundingPubkey
-dummyFundPk = FundingPubkey dummyPubkey
-
-dummyDest :: Script
-dummyDest = Script $ BS.pack [0x00, 0x14] <>
-  BS.replicate 20 0xCC
-
-dummyFeerate :: FeeratePerKw
-dummyFeerate = FeeratePerKw 253
-
-dummyDelay :: ToSelfDelay
-dummyDelay = ToSelfDelay 144
-
--- weights ------------------------------------------------------------
-
-spend_weights :: Weigh ()
-spend_weights = wgroup "spend" $ do
-  func "spend_to_local"
-    (\v -> B5.spend_to_local
-      dummyOutPoint v dummyRevPk dummyDelay
-      dummyDelayedPk dummyDest dummyFeerate)
-    (Satoshi 100000)
-
-  func "spend_anchor_owner"
-    (\v -> B5.spend_anchor_owner
-      dummyOutPoint v dummyFundPk dummyDest)
-    (Satoshi 330)
+main = do
+  fx <- fixtures
+  let keys = fx_keys fx
+      revpk = ck_revocation_pubkey keys
+      delayed = ck_local_delayed keys
+  mainWith $ do
+    wgroup "detect" $ do
+      func "identify_close"
+        (B5.identify_close (fx_other fx) (fx_commit fx)) (fx_raw fx)
+      func "classify_local_commit_outputs"
+        (\c -> B5.classify_local_commit_outputs c keys (fx_delay fx)
+           StaticRemotekey)
+        (fx_commit fx)
+      func "classify_remote_commit_outputs"
+        (\c -> B5.classify_remote_commit_outputs c keys) (fx_commit fx)
+      func "classify_revoked_commit_outputs"
+        (\c -> B5.classify_revoked_commit_outputs c revpk) (fx_commit fx)
+      func "extract_preimage_offered"
+        (B5.extract_preimage_offered (fx_hash fx)) (fx_claim fx)
+      func "extract_preimage_htlc_success"
+        (B5.extract_preimage_htlc_success (fx_hash fx)) (fx_success fx)
+    wgroup "spend" $ do
+      func "spend_to_local"
+        (\v -> B5.spend_to_local (fx_outpoint fx) v revpk (fx_delay fx)
+           delayed (fx_dest fx) (fx_feerate fx))
+        (fx_value fx)
+      func "spend_htlc_tx" (B5.spend_htlc_tx (fx_htlc_ctx fx)) keys
+      func "spend_remote_htlc_timeout"
+        (\v -> B5.spend_remote_htlc_timeout (fx_outpoint fx) v
+           (fx_received fx) keys StaticRemotekey (fx_dest fx)
+           (fx_feerate fx))
+        (fx_value fx)
+      func "spend_revoked_htlc"
+        (\v -> B5.spend_revoked_htlc (fx_outpoint fx) v
+           (B5.HTLCReceivedOutput (CltvExpiry 501)) revpk keys
+           StaticRemotekey (fx_hash fx) (fx_dest fx) (fx_feerate fx))
+        (fx_value fx)
+      func "spend_anchor_owner"
+        (\v -> B5.spend_anchor_owner (fx_outpoint fx) v
+           (ck_local_funding keys) (fx_dest fx))
+        (fx_anchor fx)
