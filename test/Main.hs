@@ -981,6 +981,33 @@ spend_tests = testGroup "Spend" [
         dummyDestScript dummyFeerate
       @?= Nothing
 
+  , testCase "spend_to_local dust threshold by script" $ do
+      let fee = unSatoshi $ B5.spending_fee dummyFeerate
+            (B5.to_local_penalty_input_weight
+             + B5.penalty_tx_base_weight)
+          sweep dest v = B5.spend_to_local
+            dummyOutPoint (Satoshi v)
+            dummyRevocationPubkey dummyDelay
+            dummyLocalDelayedPubkey dest dummyFeerate
+          outValue = fmap
+            (txout_value . head' . tx_outputs . B5.stx_tx)
+          check (name, dest, dust) = do
+            assertEqual (name <> " at threshold") (Just dust)
+              (outValue (sweep dest (fee + dust)))
+            assertEqual (name <> " below threshold") Nothing
+              (sweep dest (fee + dust - 1))
+      mapM_ check
+        [ ("p2pkh", Script $ BS.pack ([0x76, 0xa9, 0x14]
+            <> replicate 20 0xCC <> [0x88, 0xac]), 546)
+        , ("p2sh", Script $ BS.pack ([0xa9, 0x14]
+            <> replicate 20 0xCC <> [0x87]), 540)
+        , ("p2wpkh", dummyDestScript, 294)
+        , ("p2wsh", Script $ BS.pack ([0x00, 0x20]
+            <> replicate 32 0xCC), 330)
+        , ("p2tr", Script $ BS.pack ([0x51, 0x20]
+            <> replicate 32 0xCC), 330)
+        ]
+
   ]
 
 -- htlc spend tests ---------------------------------------------------
@@ -1240,6 +1267,42 @@ property_tests = testGroup "Properties" [
                in Satoshi outVal ==
                   Satoshi (unSatoshi value
                            - unSatoshi expectedFee)
+
+  , testProperty "sweeps never create dust outputs" $
+      forAll (choose (0, 3000 :: Int)) $ \v ->
+        let value = Satoshi (fromIntegral v)
+            sweeps =
+              [ B5.spend_to_local dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey dummyDestScript
+                  dummyFeerate
+              , B5.spend_remote_htlc_timeout dummyOutPoint value
+                  dummyHTLC dummyKeys dummyFeatures
+                  dummyDestScript dummyFeerate
+              , B5.spend_remote_htlc_preimage dummyOutPoint value
+                  dummyReceivedHTLC dummyKeys dummyFeatures
+                  dummyDestScript dummyFeerate
+              , B5.spend_revoked_to_local dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey dummyDestScript
+                  dummyFeerate
+              , B5.spend_revoked_htlc dummyOutPoint value
+                  (B5.HTLCOfferedOutput (CltvExpiry 500000))
+                  dummyRevocationPubkey dummyKeys dummyFeatures
+                  dummyPaymentHash dummyDestScript dummyFeerate
+              , B5.spend_revoked_htlc dummyOutPoint value
+                  (B5.HTLCReceivedOutput (CltvExpiry 500000))
+                  dummyRevocationPubkey dummyKeys dummyFeatures
+                  dummyPaymentHash dummyDestScript dummyFeerate
+              , B5.spend_revoked_htlc_output dummyOutPoint value
+                  dummyRevocationPubkey dummyDelay
+                  dummyLocalDelayedPubkey dummyDestScript
+                  dummyFeerate
+              ]
+            notDust = maybe True $ \stx ->
+              txout_value (head' (tx_outputs (B5.stx_tx stx)))
+                >= 294
+        in all notDust sweeps
 
   , testProperty "htlc_timed_out monotonic" $
       \(NonNegative h1) (NonNegative h2) ->

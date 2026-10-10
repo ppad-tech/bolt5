@@ -39,7 +39,7 @@ module Lightning.Protocol.BOLT5.Spend (
 import Bitcoin.Prim.Tx (TxOut(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import qualified Data.ByteString as BS
 import Lightning.Protocol.BOLT3 hiding
   (txout_value, txout_script)
@@ -53,7 +53,8 @@ import Lightning.Protocol.BOLT5.Types
 -- broadcasting. The caller signs with the local delayed privkey
 -- and uses 'to_local_witness_spend' from bolt3.
 --
--- Returns 'Nothing' if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 --
 -- The input nSequence is set to the to_self_delay value.
 spend_to_local
@@ -75,12 +76,10 @@ spend_to_local !op !value !revpk !delay !delayedpk
       !weight = to_local_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-  in if unSatoshi fee >= unSatoshi value
-     then Nothing
-     else
-       let !outputValue =
-             Satoshi (unSatoshi value - unSatoshi fee)
-           !tx = mk_spending_tx op
+  in case sweep_value value fee destScript of
+     Nothing -> Nothing
+     Just !outputValue ->
+       let !tx = mk_spending_tx op
                    (fromIntegral (unToSelfDelay delay))
                    destScript outputValue 0
        in Just (SpendingTx tx witnessScript value
@@ -156,7 +155,8 @@ spend_htlc_success !ctx !keys =
 -- same to_local script. The caller signs with the local
 -- delayed privkey and uses 'htlc_output_witness_spend'.
 --
--- Returns 'Nothing' if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 spend_htlc_output
   :: OutPoint
   -- ^ Outpoint of the second-stage output.
@@ -179,7 +179,8 @@ spend_htlc_output = spend_to_local
 -- On the remote commitment, their received HTLCs (our offered)
 -- have timed out and we can sweep them directly.
 --
--- Returns 'Nothing' if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 spend_remote_htlc_timeout
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
@@ -206,12 +207,10 @@ spend_remote_htlc_timeout !op !value !htlc !keys
       !weight = accepted_htlc_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-  in if unSatoshi fee >= unSatoshi value
-     then Nothing
-     else
-       let !outputValue =
-             Satoshi (unSatoshi value - unSatoshi fee)
-           !locktime =
+  in case sweep_value value fee destScript of
+     Nothing -> Nothing
+     Just !outputValue ->
+       let !locktime =
              unCltvExpiry (htlc_cltv_expiry htlc)
            !seqNo =
              if has_anchors features then 1 else 0
@@ -226,7 +225,8 @@ spend_remote_htlc_timeout !op !value !htlc !keys
 -- On the remote commitment, their offered HTLCs (our received)
 -- can be claimed with the payment preimage.
 --
--- Returns 'Nothing' if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 spend_remote_htlc_preimage
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
@@ -252,12 +252,10 @@ spend_remote_htlc_preimage !op !value !htlc !keys
       !weight = offered_htlc_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-  in if unSatoshi fee >= unSatoshi value
-     then Nothing
-     else
-       let !outputValue =
-             Satoshi (unSatoshi value - unSatoshi fee)
-           !seqNo =
+  in case sweep_value value fee destScript of
+     Nothing -> Nothing
+     Just !outputValue ->
+       let !seqNo =
              if has_anchors features then 1 else 0
            !tx = mk_spending_tx op seqNo destScript
                    outputValue 0
@@ -271,7 +269,8 @@ spend_remote_htlc_preimage !op !value !htlc !keys
 -- The caller signs with the revocation privkey and uses
 -- 'to_local_witness_revoke' from bolt3.
 --
--- Returns 'Nothing' if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 spend_revoked_to_local
   :: OutPoint
   -- ^ Outpoint of the to_local output.
@@ -291,12 +290,10 @@ spend_revoked_to_local !op !value !revpk !delay
       !weight = to_local_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-  in if unSatoshi fee >= unSatoshi value
-     then Nothing
-     else
-       let !outputValue =
-             Satoshi (unSatoshi value - unSatoshi fee)
-           !tx = mk_spending_tx op 0xFFFFFFFF destScript
+  in case sweep_value value fee destScript of
+     Nothing -> Nothing
+     Just !outputValue ->
+       let !tx = mk_spending_tx op 0xFFFFFFFF destScript
                    outputValue 0
        in Just (SpendingTx tx witnessScript value
                   SIGHASH_ALL)
@@ -308,8 +305,8 @@ spend_revoked_to_local !op !value !revpk !delay
 -- 'received_htlc_witness_revoke' from bolt3, depending on
 -- the output type.
 --
--- Returns 'Nothing' if the fee would exceed the output
--- value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 spend_revoked_htlc
   :: OutPoint
   -- ^ Outpoint of the HTLC output.
@@ -338,13 +335,10 @@ spend_revoked_htlc !op !value !htype !revpk !keys
           !weight = offered_htlc_penalty_input_weight
                   + penalty_tx_base_weight
           !fee = spending_fee feerate weight
-      in if unSatoshi fee >= unSatoshi value
-         then Nothing
-         else
-           let !outputValue =
-                 Satoshi
-                   (unSatoshi value - unSatoshi fee)
-               !tx = mk_spending_tx op 0xFFFFFFFF
+      in case sweep_value value fee destScript of
+         Nothing -> Nothing
+         Just !outputValue ->
+           let !tx = mk_spending_tx op 0xFFFFFFFF
                        destScript outputValue 0
            in Just (SpendingTx tx witnessScript value
                       SIGHASH_ALL)
@@ -359,13 +353,10 @@ spend_revoked_htlc !op !value !htype !revpk !keys
           !weight = accepted_htlc_penalty_input_weight
                   + penalty_tx_base_weight
           !fee = spending_fee feerate weight
-      in if unSatoshi fee >= unSatoshi value
-         then Nothing
-         else
-           let !outputValue =
-                 Satoshi
-                   (unSatoshi value - unSatoshi fee)
-               !tx = mk_spending_tx op 0xFFFFFFFF
+      in case sweep_value value fee destScript of
+         Nothing -> Nothing
+         Just !outputValue ->
+           let !tx = mk_spending_tx op 0xFFFFFFFF
                        destScript outputValue 0
            in Just (SpendingTx tx witnessScript value
                       SIGHASH_ALL)
@@ -377,7 +368,8 @@ spend_revoked_htlc !op !value !htype !revpk !keys
 -- to_local script. The caller signs with the revocation privkey
 -- and uses 'htlc_output_witness_revoke'.
 --
--- Returns 'Nothing' if the fee would exceed the output value.
+-- Returns 'Nothing' if the fee would exceed the output value,
+-- or leave an output below the destination's dust threshold.
 spend_revoked_htlc_output
   :: OutPoint
   -- ^ Outpoint of the second-stage output.
@@ -397,12 +389,10 @@ spend_revoked_htlc_output !op !value !revpk !delay
       !weight = to_local_penalty_input_weight
               + penalty_tx_base_weight
       !fee = spending_fee feerate weight
-  in if unSatoshi fee >= unSatoshi value
-     then Nothing
-     else
-       let !outputValue =
-             Satoshi (unSatoshi value - unSatoshi fee)
-           !tx = mk_spending_tx op 0xFFFFFFFF destScript
+  in case sweep_value value fee destScript of
+     Nothing -> Nothing
+     Just !outputValue ->
+       let !tx = mk_spending_tx op 0xFFFFFFFF destScript
                    outputValue 0
        in Just (SpendingTx tx witnessScript value
                   SIGHASH_ALL)
@@ -446,6 +436,44 @@ spend_anchor_anyone !op !value !fundpk !destScript =
   in SpendingTx tx witnessScript value SIGHASH_ALL
 
 -- internal helpers ---------------------------------------------------
+
+-- | Value of a sweep's single output: the input value less the fee.
+--
+-- 'Nothing' if the fee meets or exceeds the input value, or if the
+-- output would be below the dust threshold of its script.
+sweep_value :: Satoshi -> Satoshi -> Script -> Maybe Satoshi
+sweep_value !value !fee !destScript
+  | unSatoshi fee >= unSatoshi value = Nothing
+  | unSatoshi out < unSatoshi (dust_threshold destScript) = Nothing
+  | otherwise = Just out
+  where
+    out = Satoshi (unSatoshi value - unSatoshi fee)
+
+-- | Dust threshold for an output paying to a script.
+--
+-- As Bitcoin Core computes it for spendable outputs at the default
+-- dust relay feerate of 3 sat/vbyte: three times the size of the
+-- output plus that of an input spending it (67 vbytes for a
+-- witness program, 148 otherwise). This gives 546 sats for P2PKH,
+-- 540 for P2SH, 294 for P2WPKH, and 330 for P2WSH and P2TR.
+dust_threshold :: Script -> Satoshi
+dust_threshold (Script s) =
+  let !len = fromIntegral (BS.length s) :: Word64
+      !lenSize = if len < 0xfd then 1
+                 else if len <= 0xffff then 3
+                 else 5
+      !spendSize = if is_witness_program s then 67 else 148
+  in  Satoshi (3 * (8 + lenSize + len + spendSize))
+
+-- | Whether a script is a segwit witness program: a version opcode
+--   (OP_0 or OP_1 to OP_16) followed by a single 2-40 byte push.
+is_witness_program :: BS.ByteString -> Bool
+is_witness_program s = case BS.unpack (BS.take 2 s) of
+  [version, pushLen] ->
+       (version == 0x00 || (version >= 0x51 && version <= 0x60))
+    && pushLen >= 2 && pushLen <= 40
+    && fromIntegral pushLen + 2 == BS.length s
+  _ -> False
 
 -- | Build a simple single-input single-output spending tx.
 mk_spending_tx
