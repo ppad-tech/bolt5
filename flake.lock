@@ -581,11 +581,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791624263,
-        "narHash": "sha256-IJAffs2Cx/IjSTpNPubVlrzHLqRLUFu6XQp9yRIRbdU=",
+        "lastModified": 1791643261,
+        "narHash": "sha256-Zng+Z6E1NnsDGTvL8MQuRiMaJlm4TPOfdLV2Jhe9u4g=",
         "ref": "master",
-        "rev": "65a561493940b59c5415b4b1409b4e32dae5c08f",
-        "revCount": 33,
+        "rev": "25defad8bbaddc05c969872947968e2de35be3fe",
+        "revCount": 38,
         "type": "git",
         "url": "git://git.ppad.tech/tx.git"
       },
