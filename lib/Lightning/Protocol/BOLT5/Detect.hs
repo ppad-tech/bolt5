@@ -1,4 +1,4 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
 
 -- |
@@ -27,11 +27,14 @@ module Lightning.Protocol.BOLT5.Detect (
   , htlc_timed_out
   ) where
 
+import Bitcoin.Prim.Tx (OutPoint(..), TxId, Witness(..))
 import qualified Bitcoin.Prim.Tx as BT
 import qualified Crypto.Hash.SHA256 as SHA256
-import Data.List (mapAccumL)
-import Data.Word (Word32)
 import qualified Data.ByteString as BS
+import qualified Data.List.NonEmpty as NE
+import Data.Word (Word32)
+import Lightning.Protocol.BOLT1 (PaymentHash, PaymentPreimage)
+import qualified Lightning.Protocol.BOLT1 as BOLT1
 import Lightning.Protocol.BOLT3
 import Lightning.Protocol.BOLT5.Types
 
@@ -40,17 +43,16 @@ import Lightning.Protocol.BOLT5.Types
 -- | Identify the type of channel close from a transaction that
 --   spends the funding output.
 --
--- Parses the on-chain transaction and compares its txid against
--- the txids of the known local and remote commitment
--- transactions. Comparing txids rather than bytes means the
--- signed (segwit) serialization found on chain matches the
--- unsigned commitment.
+--   Parses the on-chain transaction and compares its txid with the
+--   txids of the known local and remote commitment transactions.
+--   Comparing txids rather than bytes means the signed (segwit)
+--   serialization found on chain matches the unsigned commitment.
 --
--- Returns 'Nothing' if the bytes don't parse as a transaction or
--- the transaction doesn't match either commitment. Mutual close
--- and revoked commitment detection require additional checks by
--- the caller (e.g. comparing closing tx format, checking a secret
--- store for older commitment numbers).
+--   Returns 'Nothing' if the bytes don't parse as a transaction or
+--   the transaction matches neither commitment. Mutual close and
+--   revoked commitment detection are left to the caller (e.g.
+--   comparing with the closing transaction, or checking a secret
+--   store for older commitment numbers).
 identify_close
   :: CommitmentTx
   -- ^ Our local commitment tx.
@@ -59,31 +61,27 @@ identify_close
   -> BS.ByteString
   -- ^ Raw serialized transaction found on chain.
   -> Maybe CloseType
-identify_close !localCommitTx !remoteCommitTx
-    !onChainBytes =
-  case BT.from_bytes onChainBytes of
-    Nothing -> Nothing
-    Just !onChainTx ->
-      let !onChainTxid = Just (BT.txid onChainTx)
-      in  if commitment_txid localCommitTx == onChainTxid
-          then Just LocalCommitClose
-          else if commitment_txid remoteCommitTx == onChainTxid
-          then Just RemoteCommitClose
-          else Nothing
+identify_close !local !remote !bytes = do
+  !tx <- BT.from_bytes bytes
+  let !txid = BT.txid tx
+  if   commitment_txid local == txid
+  then Just LocalCommitClose
+  else if commitment_txid remote == txid
+  then Just RemoteCommitClose
+  else Nothing
 
 -- output classification ----------------------------------------------
 
--- | Classify outputs of our local commitment transaction.
+-- | Classify the outputs of our local commitment transaction.
 --
--- Per BOLT #5: when we discover our local commitment on chain,
--- we must resolve each output. to_local requires a CSV-delayed
--- spend, to_remote is resolved by the commitment itself, HTLC
--- outputs need second-stage transactions, and anchors can be
--- spent immediately.
+--   Per BOLT #5: when our local commitment is on chain, we must
+--   resolve each output. to_local requires a CSV-delayed spend,
+--   to_remote is resolved by the commitment itself, HTLC outputs
+--   need second-stage transactions, and our anchor can be spent
+--   immediately.
 --
--- An HTLC output is matched to the HTLC with the same direction,
--- script, amount and CLTV expiry, and each HTLC matches at most one
--- output.
+--   Each HTLC output's HTLC is read from its bolt3 'OutputHTLC', so
+--   the commitment must be the one bolt3 built for this state.
 classify_local_commit_outputs
   :: CommitmentTx
   -- ^ Our local commitment transaction.
@@ -91,306 +89,166 @@ classify_local_commit_outputs
   -- ^ Derived keys for this commitment.
   -> ToSelfDelay
   -- ^ Remote's to_self_delay (CSV delay for our outputs).
-  -> ChannelFeatures
-  -- ^ Channel feature flags.
-  -> [HTLC]
-  -- ^ HTLCs in this commitment.
+  -> CommitmentFormat
   -> [UnresolvedOutput]
-classify_local_commit_outputs !commitTx !keys !delay
-    !features !htlcs =
-  case commitment_txid commitTx of
-    Nothing -> []
-    Just !txid ->
-      let !outputs = ctx_outputs commitTx
-          !revpk = ck_revocation_pubkey keys
-          !delayedpk = ck_local_delayed keys
-          classify cands (idx, out) =
-            classifyLocalOutput txid revpk delayedpk
-              delay features keys cands idx out
-      in  snd (mapAccumL classify
-                 (htlc_candidates keys features htlcs)
-                 (zip [0..] outputs))
+classify_local_commit_outputs !tx !keys !delay !fmt =
+    classify_outputs resolve tx
+  where
+    resolve t = case t of
+      OutputToLocal ->
+        SpendToLocal delay (ck_revocation_pubkey keys)
+          (ck_local_delayed keys)
+      OutputToRemote -> Resolved
+      OutputLocalAnchor -> AnchorSpend (ck_local_funding keys)
+      OutputRemoteAnchor -> Resolved
+      OutputHTLC h -> case htlc_direction h of
+        HTLCOffered  -> SpendHTLCTimeout h keys fmt
+        HTLCReceived -> SpendHTLCSuccess h keys fmt
 
--- | Classify a single output from a local commitment tx, removing
---   any matched HTLC from the candidates.
-classifyLocalOutput
-  :: TxId
-  -> RevocationPubkey
-  -> LocalDelayedPubkey
-  -> ToSelfDelay
-  -> ChannelFeatures
-  -> CommitmentKeys
-  -> [(HTLC, Script)]
-  -> Word32
-  -> TxOutput
-  -> ([(HTLC, Script)], UnresolvedOutput)
-classifyLocalOutput !txid !revpk !delayedpk !delay
-    !features !keys !cands !idx !out =
-  let !op = OutPoint txid idx
-      !val = txout_value out
-      !(rest, resolution) = case txout_type out of
-        OutputToLocal ->
-          (cands, SpendToLocal delay revpk delayedpk)
-        OutputToRemote ->
-          (cands, Resolved)
-        OutputLocalAnchor ->
-          (cands, AnchorSpend (ck_local_funding keys))
-        OutputRemoteAnchor ->
-          (cands, Resolved)
-        OutputOfferedHTLC expiry ->
-          case take_htlc HTLCOffered expiry out cands of
-            (Just htlc, cands') ->
-              (cands', SpendHTLCTimeout htlc keys features)
-            (Nothing, cands') -> (cands', Resolved)
-        OutputReceivedHTLC expiry ->
-          case take_htlc HTLCReceived expiry out cands of
-            (Just htlc, cands') ->
-              (cands', SpendHTLCSuccess htlc keys features)
-            (Nothing, cands') -> (cands', Resolved)
-  in (rest, UnresolvedOutput op val resolution)
-
--- | Classify outputs of the remote commitment transaction.
+-- | Classify the outputs of the remote commitment transaction.
 --
--- Per BOLT #5: when we discover the remote commitment on chain,
--- there are no CSV delays on our outputs. We can spend offered
--- HTLCs directly after timeout, and received HTLCs directly
--- with the preimage.
+--   Per BOLT #5: when the remote commitment is on chain, there are
+--   no CSV delays on our outputs. We can spend HTLCs we offered
+--   directly after timeout, and HTLCs we received directly with the
+--   preimage.
 --
--- HTLC outputs are matched as in 'classify_local_commit_outputs'.
+--   The commitment, its keys and its HTLCs are from the remote's
+--   point of view (as bolt3 builds the remote's commitment): an
+--   HTLC the remote offered is one we received.
 classify_remote_commit_outputs
   :: CommitmentTx
   -- ^ The remote commitment transaction.
   -> CommitmentKeys
-  -- ^ Derived keys for this commitment (from remote's
-  --   perspective, so local/remote are swapped).
-  -> ChannelFeatures
-  -- ^ Channel feature flags.
-  -> [HTLC]
-  -- ^ HTLCs in this commitment.
+  -- ^ Derived keys for this commitment (from the remote's point
+  --   of view, so local and remote are swapped).
   -> [UnresolvedOutput]
-classify_remote_commit_outputs !commitTx !keys
-    !features !htlcs =
-  case commitment_txid commitTx of
-    Nothing -> []
-    Just !txid ->
-      let !outputs = ctx_outputs commitTx
-          classify cands (idx, out) =
-            classifyRemoteOutput txid keys cands idx out
-      in  snd (mapAccumL classify
-                 (htlc_candidates keys features htlcs)
-                 (zip [0..] outputs))
+classify_remote_commit_outputs !tx !keys =
+    classify_outputs resolve tx
+  where
+    resolve t = case t of
+      OutputToLocal -> Resolved       -- the remote's to_local
+      OutputToRemote -> Resolved      -- ours; resolved by the commitment
+      OutputLocalAnchor -> Resolved   -- the remote's anchor
+      OutputRemoteAnchor -> AnchorSpend (ck_remote_funding keys)
+      OutputHTLC h -> case htlc_direction h of
+        HTLCOffered  -> SpendHTLCPreimageDirect h  -- we received it
+        HTLCReceived -> SpendHTLCTimeoutDirect h   -- we offered it
 
--- | Classify a single output from a remote commitment tx, removing
---   any matched HTLC from the candidates.
-classifyRemoteOutput
-  :: TxId
-  -> CommitmentKeys
-  -> [(HTLC, Script)]
-  -> Word32
-  -> TxOutput
-  -> ([(HTLC, Script)], UnresolvedOutput)
-classifyRemoteOutput !txid !keys !cands !idx !out =
-  let !op = OutPoint txid idx
-      !val = txout_value out
-      !(rest, resolution) = case txout_type out of
-        OutputToLocal ->
-          (cands, Resolved)  -- Remote's to_local; not ours
-        OutputToRemote ->
-          (cands, Resolved)  -- Our to_remote; resolved by commitment
-        OutputLocalAnchor ->
-          (cands, Resolved)  -- Remote's anchor
-        OutputRemoteAnchor ->
-          (cands, AnchorSpend (ck_remote_funding keys))
-        OutputOfferedHTLC expiry ->
-          -- On remote's commit, their offered = our received.
-          -- We can claim with preimage.
-          case take_htlc HTLCOffered expiry out cands of
-            (Just htlc, cands') ->
-              (cands', SpendHTLCPreimageDirect htlc)
-            (Nothing, cands') -> (cands', Resolved)
-        OutputReceivedHTLC expiry ->
-          -- On remote's commit, their received = our offered.
-          -- We can claim after timeout.
-          case take_htlc HTLCReceived expiry out cands of
-            (Just htlc, cands') ->
-              (cands', SpendHTLCTimeoutDirect htlc)
-            (Nothing, cands') -> (cands', Resolved)
-  in (rest, UnresolvedOutput op val resolution)
-
--- | Classify outputs of a revoked commitment transaction.
+-- | Classify the outputs of a revoked commitment transaction.
 --
--- Per BOLT #5: when we discover a revoked commitment, we can
--- claim everything using the revocation key. to_local is spent
--- via revocation, HTLCs are spent via revocation, and we can
--- also optionally sweep to_remote.
+--   Per BOLT #5: when a revoked commitment is on chain, we can
+--   claim to_local and every HTLC output with the revocation key.
+--   to_remote (ours) and the anchors are marked 'Resolved'.
 classify_revoked_commit_outputs
   :: CommitmentTx
   -- ^ The revoked commitment transaction.
-  -> CommitmentKeys
-  -- ^ Derived keys for the revoked commitment.
   -> RevocationPubkey
   -- ^ Revocation pubkey (derived from the revealed secret).
-  -> ChannelFeatures
-  -- ^ Channel feature flags.
-  -> [HTLC]
-  -- ^ HTLCs in the revoked commitment.
   -> [UnresolvedOutput]
-classify_revoked_commit_outputs !commitTx !_keys
-    !revpk !_features !_htlcs =
-  case commitment_txid commitTx of
-    Nothing -> []
-    Just !txid ->
-      let !outputs = ctx_outputs commitTx
-      in  zipWith (classifyRevokedOutput txid revpk)
-            [0..] outputs
+classify_revoked_commit_outputs !tx !revpk =
+    classify_outputs resolve tx
+  where
+    resolve t = case t of
+      OutputToLocal -> Revoke revpk
+      OutputToRemote -> Resolved
+      OutputLocalAnchor -> Resolved
+      OutputRemoteAnchor -> Resolved
+      OutputHTLC h -> RevokeHTLC revpk $ case htlc_direction h of
+        HTLCOffered  -> HTLCOfferedOutput (htlc_cltv_expiry h)
+        HTLCReceived -> HTLCReceivedOutput (htlc_cltv_expiry h)
 
--- | Classify a single output from a revoked commitment tx.
-classifyRevokedOutput
-  :: TxId
-  -> RevocationPubkey
-  -> Word32
-  -> TxOutput
-  -> UnresolvedOutput
-classifyRevokedOutput !txid !revpk !idx !out =
-  let !op = OutPoint txid idx
-      !val = txout_value out
-      !resolution = case txout_type out of
-        OutputToLocal ->
-          Revoke revpk
-        OutputToRemote ->
-          Resolved  -- Our funds; resolved by commitment
-        OutputLocalAnchor ->
-          Resolved  -- Can be swept by anyone after 16 blocks
-        OutputRemoteAnchor ->
-          Resolved  -- Our anchor
-        OutputOfferedHTLC expiry ->
-          RevokeHTLC revpk (HTLCOfferedOutput expiry)
-        OutputReceivedHTLC expiry ->
-          RevokeHTLC revpk (HTLCReceivedOutput expiry)
-  in UnresolvedOutput op val resolution
+-- | Pair each commitment output with its outpoint, value and
+--   resolution.
+classify_outputs
+  :: (OutputType -> OutputResolution)
+  -> CommitmentTx
+  -> [UnresolvedOutput]
+classify_outputs resolve tx =
+    zipWith classify [0..] (NE.toList (ctx_outputs tx))
+  where
+    !txid = commitment_txid tx
+    classify :: Word32 -> CommitmentOutput -> UnresolvedOutput
+    classify !idx !out = UnresolvedOutput
+      { uo_outpoint = OutPoint txid idx
+      , uo_value    = co_value out
+      , uo_type     = resolve (co_type out)
+      }
 
 -- preimage extraction ------------------------------------------------
 
--- | Extract a payment preimage from an offered HTLC witness.
+-- | Extract a payment preimage from the witness of an input
+--   spending an offered HTLC output.
 --
--- When the remote party claims an offered HTLC on our local
--- commitment, the witness contains the preimage. The witness
--- stack for a preimage claim is:
+--   When the remote party claims an offered HTLC on our local
+--   commitment, the witness (see bolt3's
+--   'offered_htlc_witness_preimage') is:
 --
--- @\<remotehtlcsig\> \<paymentPreimage\> \<witnessScript\>@
+--   @\<remotehtlcsig\> \<payment_preimage\> \<witness_script\>@
 --
--- Returns the preimage only if it hashes to the given payment
--- hash. Any other spend of the output, e.g. by revocation, yields
--- 'Nothing'.
+--   Returns the preimage only if it hashes to the given payment
+--   hash. Any other spend of the output, e.g. by revocation, yields
+--   'Nothing'.
 extract_preimage_offered
   :: PaymentHash
   -- ^ Payment hash of the HTLC.
   -> Witness
   -- ^ Witness of the input spending the HTLC output.
   -> Maybe PaymentPreimage
-extract_preimage_offered !ph (Witness items) =
-  case items of
-    [_sig, preimageBytes, _script] ->
-      check_preimage ph preimageBytes
-    _ -> Nothing
+extract_preimage_offered !ph (Witness items) = case items of
+  [_sig, preimage, _script] -> check_preimage ph preimage
+  _ -> Nothing
 
--- | Extract a payment preimage from an HTLC-success transaction
---   witness.
+-- | Extract a payment preimage from the witness of an HTLC-success
+--   transaction's input.
 --
--- When the remote party uses an HTLC-success tx on their
--- commitment to claim a received HTLC, the witness contains the
--- preimage. The witness stack is:
+--   When the remote party claims an HTLC it received on its
+--   commitment with an HTLC-success transaction, the witness (see
+--   bolt3's 'htlc_success_witness') is:
 --
--- @0 \<remotehtlcsig\> \<localhtlcsig\> \<paymentPreimage\>
--- \<witnessScript\>@
+--   @0 \<remotehtlcsig\> \<localhtlcsig\> \<payment_preimage\>
+--   \<witness_script\>@
 --
--- Returns the preimage only if it hashes to the given payment
--- hash.
+--   Returns the preimage only if it hashes to the given payment
+--   hash.
 extract_preimage_htlc_success
   :: PaymentHash
   -- ^ Payment hash of the HTLC.
   -> Witness
   -- ^ Witness of the HTLC-success transaction input.
   -> Maybe PaymentPreimage
-extract_preimage_htlc_success !ph (Witness items) =
-  case items of
-    [_zero, _remoteSig, _localSig, preimageBytes, _script] ->
-      check_preimage ph preimageBytes
-    _ -> Nothing
+extract_preimage_htlc_success !ph (Witness items) = case items of
+  [_zero, _remote_sig, _local_sig, preimage, _script] ->
+    check_preimage ph preimage
+  _ -> Nothing
 
 -- | Accept a candidate preimage only if it hashes to the payment
 --   hash.
 check_preimage :: PaymentHash -> BS.ByteString -> Maybe PaymentPreimage
 check_preimage !ph !bs
-  | SHA256.hash bs == unPaymentHash ph = paymentPreimage bs
+  | SHA256.hash bs == BOLT1.un_payment_hash ph = BOLT1.payment_preimage bs
   | otherwise = Nothing
 
 -- timeout check ------------------------------------------------------
 
--- | Check if an HTLC has timed out at the given block height.
+-- | Whether an HTLC has timed out at the given block height: whether
+--   the height is at least the HTLC's CLTV expiry.
 --
--- An HTLC has timed out when the current block height is equal
--- to or greater than the HTLC's CLTV expiry.
+--   >>> let Just amt = BOLT1.milli_satoshi 1000000
+--   >>> let Just ph = BOLT1.payment_hash (BS.replicate 32 0xaa)
+--   >>> let htlc = HTLC HTLCOffered amt ph (CltvExpiry 800000)
+--   >>> htlc_timed_out 799999 htlc
+--   False
+--   >>> htlc_timed_out 800000 htlc
+--   True
 htlc_timed_out :: Word32 -> HTLC -> Bool
-htlc_timed_out !currentHeight !htlc =
-  currentHeight >= unCltvExpiry (htlc_cltv_expiry htlc)
+htlc_timed_out !height !htlc =
+  let CltvExpiry expiry = htlc_cltv_expiry htlc
+  in  height >= expiry
 {-# INLINE htlc_timed_out #-}
 
 -- internal helpers ---------------------------------------------------
 
--- | Compute the txid of a commitment transaction.
---
--- Returns 'Nothing' if the commitment has no outputs.
-commitment_txid :: CommitmentTx -> Maybe TxId
-commitment_txid !tx = fmap BT.txid (commitment_to_tx tx)
-
--- | Pair each HTLC with the P2WSH script of its commitment output.
-htlc_candidates
-  :: CommitmentKeys
-  -> ChannelFeatures
-  -> [HTLC]
-  -> [(HTLC, Script)]
-htlc_candidates !keys !features = map (\htlc -> (htlc, script htlc))
-  where
-    script htlc = case htlc_direction htlc of
-      HTLCOffered ->
-        to_p2wsh $ offered_htlc_script
-          (ck_revocation_pubkey keys)
-          (ck_remote_htlc keys)
-          (ck_local_htlc keys)
-          (htlc_payment_hash htlc)
-          features
-      HTLCReceived ->
-        to_p2wsh $ received_htlc_script
-          (ck_revocation_pubkey keys)
-          (ck_remote_htlc keys)
-          (ck_local_htlc keys)
-          (htlc_payment_hash htlc)
-          (htlc_cltv_expiry htlc)
-          features
-
--- | Find the HTLC for an HTLC output and remove it from the
---   candidates.
---
--- The HTLC must agree with the output on direction, script, amount
--- and CLTV expiry. The offered HTLC script doesn't commit to the
--- expiry and no HTLC script commits to the amount, so HTLCs sharing
--- a payment hash differ only in these. Removing the match ensures
--- no two outputs resolve to the same HTLC.
-take_htlc
-  :: HTLCDirection
-  -> CltvExpiry
-  -- ^ Expiry recorded for the output.
-  -> TxOutput
-  -> [(HTLC, Script)]
-  -> (Maybe HTLC, [(HTLC, Script)])
-take_htlc !dir !expiry !out !cands =
-  case break matches cands of
-    (pre, (htlc, _) : post) -> (Just htlc, pre ++ post)
-    (_, []) -> (Nothing, cands)
-  where
-    matches (htlc, script) =
-         htlc_direction htlc == dir
-      && htlc_cltv_expiry htlc == expiry
-      && msatToSat (htlc_amount_msat htlc) == txout_value out
-      && script == txout_script out
+-- | The txid of a commitment transaction.
+commitment_txid :: CommitmentTx -> TxId
+commitment_txid = BT.txid . commitment_to_tx
+{-# INLINE commitment_txid #-}

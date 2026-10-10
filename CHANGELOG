@@ -1,4 +1,60 @@
 # Changelog
 
-- 0.0.1 (UNRELEASED)
-  * Initial release
+- 0.1.0 (UNRELEASED)
+  * The library's scope is being redesigned, and this version is not
+    yet ready for release (see the README for what it does and
+    doesn't cover).
+
+  * Ports to ppad-bolt1 0.1.0, ppad-bolt3 0.1.0 and ppad-tx 0.2.0, with
+    breaking changes:
+
+    * Amounts, points and hashes are bolt1's types (amounts are
+      bounded, with checked arithmetic), and ChannelFeatures is
+      replaced by bolt3's CommitmentFormat.
+
+    * The classifiers read each HTLC output's HTLC from bolt3's
+      OutputHTLC, and no longer take an HTLC list.
+      classify_remote_commit_outputs no longer takes the channel
+      features, and classify_revoked_commit_outputs takes only the
+      commitment and the revocation pubkey.
+
+    * spend_htlc_tx replaces spend_htlc_timeout and spend_htlc_success,
+      building the transaction with bolt3's build_htlc_tx, and fails
+      if bolt3 can't build it.
+
+    * The API is exported from Lightning.Protocol.BOLT5 alone, with
+      snake_case names (htlc_output_type, htlc_output_type_weight); the
+      Internal module is removed. Every public type has an NFData
+      instance.
+
+    * extract_preimage_offered and extract_preimage_htlc_success take
+      the HTLC's payment hash, and revoked_output_weight and
+      htlc_output_type_weight the commitment format.
+
+    * spending_fee saturates at 21 million BTC.
+
+  * Fixes preimage extraction, which never matched a real witness (one
+    ending in the witness script), and checks preimages against the
+    payment hash.
+
+  * Fixes identify_close, which compared an unsigned serialization with
+    the signed transaction found on chain; it compares txids.
+
+  * Fixes HTLC output classification, which matched outputs to HTLCs by
+    script alone, so that HTLCs sharing a payment hash were confused.
+
+  * Fixes the sighash type of the local signature on anchor-channel
+    HTLC transactions, which is SIGHASH_ALL.
+
+  * Sweeps no longer create outputs below the destination's dust
+    threshold, and anchor-channel HTLC penalty sweeps use the anchor
+    scripts' weights.
+
+  * Removes spend_revoked_batch and PenaltyContext, whose transaction
+    couldn't be signed.
+
+  * Tests check HTLC transactions and preimage extraction against the
+    BOLT #3 Appendix C and F vectors.
+
+- 0.0.1 (2026-04-18)
+  * Initial release.

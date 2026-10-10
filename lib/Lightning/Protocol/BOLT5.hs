@@ -9,84 +9,50 @@
 -- On-chain transaction handling for the Lightning Network, per
 -- [BOLT #5](https://github.com/lightning/bolts/blob/master/05-onchain.md).
 --
--- This module implements the logic for handling channel closures:
---
--- * Mutual close - cooperative closure agreed by both parties
--- * Unilateral close - one party publishes their commitment
---   transaction
--- * Revoked transaction close - penalty for publishing old state
+-- This library's scope is being redesigned, and it is not yet ready
+-- for release. It covers unilateral closes only partially: it
+-- identifies a local or remote commitment on chain, classifies its
+-- outputs, extracts preimages from HTLC spends, and builds unsigned,
+-- single-input spending transactions. It doesn't detect mutual or
+-- revoked closes, assemble witnesses, or attach fee inputs to anchor
+-- spends and zero-fee HTLC transactions.
 --
 -- = Design
 --
--- This is a stateless toolkit of pure functions. The caller
--- manages channel state (which outputs are resolved, current
--- block height, etc.) and provides explicit inputs. Functions
--- produce unsigned 'SpendingTx' values; the caller signs and
--- assembles witnesses using bolt3 constructors.
+-- This is a stateless toolkit of pure functions. The caller manages
+-- channel state (which outputs are resolved, the current block
+-- height, etc.) and provides explicit inputs. Commitment
+-- transactions are those built by ppad-bolt3, and amounts are
+-- ppad-bolt1's. Functions produce unsigned t'SpendingTx' values; the
+-- caller signs them and assembles witnesses with bolt3's witness
+-- functions.
 --
 -- = Usage
 --
 -- @
+-- import qualified Lightning.Protocol.BOLT1 as BOLT1
 -- import Lightning.Protocol.BOLT3
 -- import Lightning.Protocol.BOLT5
 --
--- -- Classify outputs of our local commitment
--- let outputs = classify_local_commit_outputs
---       commitTx keys delay features htlcs
+-- -- classify the outputs of our local commitment
+-- let outputs = classify_local_commit_outputs commit keys delay fmt
 --
--- -- For each unresolved output, construct spending tx
+-- -- for each unresolved output, build a spending transaction
 -- case uo_type output of
 --   SpendToLocal delay revpk delayedpk ->
---     spend_to_local (uo_outpoint output)
---       (uo_value output) revpk delay delayedpk
---       destScript feerate
+--     spend_to_local (uo_outpoint output) (uo_value output)
+--       revpk delay delayedpk dest feerate
 --   ...
 -- @
 
 module Lightning.Protocol.BOLT5 (
-    -- * Types
-    -- ** Close identification
-    CloseType(..)
-
-    -- ** Output classification
-  , UnresolvedOutput(..)
-  , OutputResolution(..)
-
-    -- ** HTLC output type
-  , HTLCOutputType(..)
-  , htlcOutputType
-  , htlcOutputTypeWeight
-
-    -- ** Spending transactions
-  , SpendingTx(..)
-
-    -- ** Revoked outputs
-  , RevokedOutput(..)
-  , RevokedOutputType(..)
-  , revoked_output_weight
-
-    -- * Weight constants (Appendix A)
-  , to_local_penalty_witness_weight
-  , offered_htlc_penalty_witness_weight
-  , accepted_htlc_penalty_witness_weight
-  , offered_htlc_penalty_witness_weight_anchors
-  , accepted_htlc_penalty_witness_weight_anchors
-  , to_local_penalty_input_weight
-  , offered_htlc_penalty_input_weight
-  , accepted_htlc_penalty_input_weight
-  , offered_htlc_penalty_input_weight_anchors
-  , accepted_htlc_penalty_input_weight_anchors
-  , to_remote_input_weight
-  , penalty_tx_base_weight
-  , max_standard_weight
-
-    -- * Fee calculation
-  , spending_fee
-
     -- * Close identification
+    CloseType(..)
   , identify_close
 
     -- * Output classification
+  , UnresolvedOutput(..)
+  , OutputResolution(..)
   , classify_local_commit_outputs
   , classify_remote_commit_outputs
   , classify_revoked_commit_outputs
@@ -98,11 +64,12 @@ module Lightning.Protocol.BOLT5 (
     -- * Timeout check
   , htlc_timed_out
 
-    -- * Spending transaction construction
+    -- * Spending transactions
+  , SpendingTx(..)
+
     -- ** Local commitment
   , spend_to_local
-  , spend_htlc_timeout
-  , spend_htlc_success
+  , spend_htlc_tx
   , spend_htlc_output
 
     -- ** Remote commitment
@@ -117,8 +84,34 @@ module Lightning.Protocol.BOLT5 (
     -- ** Anchor outputs
   , spend_anchor_owner
   , spend_anchor_anyone
+
+    -- * Revoked outputs
+  , HTLCOutputType(..)
+  , htlc_output_type
+  , RevokedOutput(..)
+  , RevokedOutputType(..)
+
+    -- * Weights (Appendix A)
+  , revoked_output_weight
+  , htlc_output_type_weight
+  , to_local_penalty_witness_weight
+  , offered_htlc_penalty_witness_weight
+  , accepted_htlc_penalty_witness_weight
+  , offered_htlc_penalty_witness_weight_anchors
+  , accepted_htlc_penalty_witness_weight_anchors
+  , to_local_penalty_input_weight
+  , offered_htlc_penalty_input_weight
+  , accepted_htlc_penalty_input_weight
+  , offered_htlc_penalty_input_weight_anchors
+  , accepted_htlc_penalty_input_weight_anchors
+  , to_remote_input_weight
+  , penalty_tx_base_weight
+  , max_standard_weight
+
+    -- * Fees
+  , spending_fee
   ) where
 
-import Lightning.Protocol.BOLT5.Types
 import Lightning.Protocol.BOLT5.Detect
 import Lightning.Protocol.BOLT5.Spend
+import Lightning.Protocol.BOLT5.Types
