@@ -23,7 +23,7 @@
 -- channel state (which outputs are resolved, the current block
 -- height, etc.) and provides explicit inputs. Commitment
 -- transactions are those built by ppad-bolt3, and amounts are
--- ppad-bolt1's. Functions produce unsigned 'SpendingTx' values; the
+-- ppad-bolt1's. Functions produce unsigned t'SpendingTx' values; the
 -- caller signs them and assembles witnesses with bolt3's witness
 -- functions.
 --

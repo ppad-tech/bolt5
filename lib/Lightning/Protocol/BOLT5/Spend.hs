@@ -10,7 +10,7 @@
 -- Spending transaction construction for BOLT #5 on-chain
 -- transaction handling.
 --
--- All functions produce unsigned 'SpendingTx' values. The caller
+-- All functions produce unsigned t'SpendingTx' values. The caller
 -- signs (using the sighash metadata provided) and assembles the
 -- witness with bolt3's witness functions.
 
