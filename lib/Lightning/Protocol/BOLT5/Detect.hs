@@ -28,6 +28,7 @@ module Lightning.Protocol.BOLT5.Detect (
   ) where
 
 import qualified Bitcoin.Prim.Tx as BT
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Word (Word32)
 import qualified Data.ByteString as BS
 import Lightning.Protocol.BOLT3
@@ -265,16 +266,21 @@ classifyRevokedOutput !txid !revpk !idx !out =
 -- commitment, the witness contains the preimage. The witness
 -- stack for a preimage claim is:
 --
--- @\<remotehtlcsig\> \<paymentPreimage\>@
+-- @\<remotehtlcsig\> \<paymentPreimage\> \<witnessScript\>@
 --
--- The preimage is the second item (32 bytes) and must hash to
--- the expected payment hash.
-extract_preimage_offered :: Witness -> Maybe PaymentPreimage
-extract_preimage_offered (Witness items) =
+-- Returns the preimage only if it hashes to the given payment
+-- hash. Any other spend of the output, e.g. by revocation, yields
+-- 'Nothing'.
+extract_preimage_offered
+  :: PaymentHash
+  -- ^ Payment hash of the HTLC.
+  -> Witness
+  -- ^ Witness of the input spending the HTLC output.
+  -> Maybe PaymentPreimage
+extract_preimage_offered !ph (Witness items) =
   case items of
-    [_sig, preimageBytes]
-      | BS.length preimageBytes == 32 ->
-          paymentPreimage preimageBytes
+    [_sig, preimageBytes, _script] ->
+      check_preimage ph preimageBytes
     _ -> Nothing
 
 -- | Extract a payment preimage from an HTLC-success transaction
@@ -284,17 +290,29 @@ extract_preimage_offered (Witness items) =
 -- commitment to claim a received HTLC, the witness contains the
 -- preimage. The witness stack is:
 --
--- @0 \<remotehtlcsig\> \<localhtlcsig\> \<paymentPreimage\>@
+-- @0 \<remotehtlcsig\> \<localhtlcsig\> \<paymentPreimage\>
+-- \<witnessScript\>@
 --
--- The preimage is the fourth item (32 bytes).
+-- Returns the preimage only if it hashes to the given payment
+-- hash.
 extract_preimage_htlc_success
-  :: Witness -> Maybe PaymentPreimage
-extract_preimage_htlc_success (Witness items) =
+  :: PaymentHash
+  -- ^ Payment hash of the HTLC.
+  -> Witness
+  -- ^ Witness of the HTLC-success transaction input.
+  -> Maybe PaymentPreimage
+extract_preimage_htlc_success !ph (Witness items) =
   case items of
-    [_zero, _remoteSig, _localSig, preimageBytes]
-      | BS.length preimageBytes == 32 ->
-          paymentPreimage preimageBytes
+    [_zero, _remoteSig, _localSig, preimageBytes, _script] ->
+      check_preimage ph preimageBytes
     _ -> Nothing
+
+-- | Accept a candidate preimage only if it hashes to the payment
+--   hash.
+check_preimage :: PaymentHash -> BS.ByteString -> Maybe PaymentPreimage
+check_preimage !ph !bs
+  | SHA256.hash bs == unPaymentHash ph = paymentPreimage bs
+  | otherwise = Nothing
 
 -- timeout check ------------------------------------------------------
 

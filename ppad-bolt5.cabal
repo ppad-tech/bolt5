@@ -50,6 +50,7 @@ test-suite bolt5-tests
     , bytestring
     , ppad-bolt3
     , ppad-bolt5
+    , ppad-sha256
     , ppad-tx
     , tasty
     , tasty-hunit

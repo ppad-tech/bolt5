@@ -3,8 +3,9 @@
 
 module Main where
 
-import Bitcoin.Prim.Tx (TxOut(..))
+import Bitcoin.Prim.Tx (TxOut(..), from_base16)
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Word (Word8)
@@ -34,10 +35,6 @@ main = defaultMain $ testGroup "ppad-bolt5" [
 -- Dummy 32-byte hash
 dummyHash32 :: BS.ByteString
 dummyHash32 = BS.replicate 32 0xAA
-
--- Dummy 32-byte preimage
-dummyPreimage :: BS.ByteString
-dummyPreimage = BS.replicate 32 0xBB
 
 dummyTxId :: TxId
 dummyTxId = TxId (BS.replicate 32 0x00)
@@ -196,6 +193,86 @@ dummyRemoteCommitTx = CommitmentTx
   , ctx_funding_script = dummyDestScript
   }
 
+-- BOLT #3 Appendix C/F vectors -------------------------------------
+
+-- | Payment hash of an Appendix C HTLC whose preimage is 32 copies
+--   of the given byte.
+vecPaymentHash :: Word8 -> PaymentHash
+vecPaymentHash b = PaymentHash (SHA256.hash (BS.replicate 32 b))
+
+-- | Appendix C: HTLC-success tx for htlc #1 from the same
+--   commitment (signed).
+vecCHtlcSuccess1 :: BS.ByteString
+vecCHtlcSuccess1 =
+  "020000000001014bdccf28653066a2c554cafeffdfe1e678e64a69b056684deb\
+  \0c4fba909423ec000000000000000000011f070000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004830\
+  \45022100b470fe12e5b7fea9eccb8cbff1972cea4f96758041898982a02bcc7f\
+  \9d56d50b0220338a75b2afaab4ec00cdd2d9273c68c7581ff5a28bcbb40c4d13\
+  \8b81f1d45ce501473044022017b90c65207522a907fb6a137f9dd528b3389465\
+  \a8ae72308d9e1d564f512cf402204fc917b4f0e88604a3e994f85bfae7c7c1f9\
+  \d9e9f78e8cd112e0889720d9405b012001010101010101010101010101010101\
+  \010101010101010101010101010101018a76a91414011f7254d96b819c76986c\
+  \277d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a21\
+  \84d88256816826d6231c068d4a5b7c8201208763a9144b6b2e5444c2639cc0fb\
+  \7bcea5afba3f3cdce23988527c21030d417a46946384f88d5f3337267c5e5797\
+  \65875dc4daca813e21734b140639e752ae677502f501b175ac686800000000"
+
+-- | Appendix C: HTLC-timeout tx for htlc #5 from the same
+--   commitment (signed).
+vecCHtlcTimeout5 :: BS.ByteString
+vecCHtlcTimeout5 =
+  "020000000001014bdccf28653066a2c554cafeffdfe1e678e64a69b056684deb\
+  \0c4fba909423ec02000000000000000001e1120000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004730\
+  \440220471c9f3ad92e49b13b7b8059f43ecf8f7887b0dccbb9fdb54bfe23d62a\
+  \8ae332022024bd22fae0740e86a44228c35330da9526fd7306dffb2b9dc362d5\
+  \e78abef7cc0147304402207157f452f2506d73c315192311893800cfb3cc235c\
+  \c1185b1cfcc136b55230db022014be242dbc6c5da141fec4034e7f387f74d6ff\
+  \1899453d72ba957467540e1ecb01008576a91414011f7254d96b819c76986c27\
+  \7d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a2184\
+  \d88256816826d6231c068d4a5b7c820120876475527c21030d417a46946384f8\
+  \8d5f3337267c5e579765875dc4daca813e21734b140639e752ae67a9142002cc\
+  \93ebefbb1b73f0af055dcc27a0b504ad7688ac6868fa010000"
+
+-- | Appendix F: HTLC-success tx for htlc #1 from "commitment tx
+--   with seven outputs untrimmed" (signed).
+vecFHtlcSuccess1 :: BS.ByteString
+vecFHtlcSuccess1 =
+  "02000000000101b8cefef62ea66f5178b9361b2371be0759cbc8c689bcfa7a8e\
+  \6746d497ec221a04000000000100000001d0070000000000002200204adb4e2f\
+  \00643db396dd120d4e7dc17625f5f2c11a40d857accc862d6b7dd80e05004730\
+  \44022035977f2aa6d6ae12f1dae3366440faa17558e9c88c3188bfc8df7e276c\
+  \6c65410220659f1f9070c725d9d46e43b99a36fc6d711d36069704add2d57fc1\
+  \fa2818cf12834730440220191ba44e57b1601a59d99f85971d4801b286d428de\
+  \275487c87ceeb8df1a4811022002215875d92833df0c9615c9096cf97152f871\
+  \39ed9f82718bbb5b8b3d31252401200101010101010101010101010101010101\
+  \0101010101010101010101010101018d76a91414011f7254d96b819c76986c27\
+  \7d115efce6f7b58763ac67210394854aa6eab5b2a8122cc726e9dded053a2184\
+  \d88256816826d6231c068d4a5b7c8201208763a9144b6b2e5444c2639cc0fb7b\
+  \cea5afba3f3cdce23988527c21030d417a46946384f88d5f3337267c5e579765\
+  \875dc4daca813e21734b140639e752ae677502f501b175ac6851b27568000000\
+  \00"
+
+-- | Parse a hex-encoded transaction, failing the test otherwise.
+parseTx :: BS.ByteString -> IO Tx
+parseTx = assertJust "invalid transaction hex" . from_base16
+
+-- | Witness stack of a single-input transaction.
+singleWitness :: Tx -> IO [BS.ByteString]
+singleWitness tx = case tx_witnesses tx of
+  [Witness items] -> pure items
+  _ -> assertFailure "expected a single witness"
+
+-- | Remote signature and offered HTLC witness script, taken from the
+--   Appendix C HTLC-timeout tx for htlc #5.
+offeredClaimParts :: IO (BS.ByteString, BS.ByteString)
+offeredClaimParts = do
+  items <- singleWitness =<< parseTx vecCHtlcTimeout5
+  case items of
+    [_, sig, _, _, script] -> pure (sig, script)
+    _ -> assertFailure "unexpected HTLC-timeout witness"
+
 -- types tests --------------------------------------------------------
 
 types_tests :: TestTree
@@ -228,52 +305,66 @@ types_tests = testGroup "Types" [
 
 detect_tests :: TestTree
 detect_tests = testGroup "Detect" [
-    testCase "extract_preimage_offered - valid" $ do
-      let sig = BS.replicate 72 0x30
-          preimage = dummyPreimage
-          wit = Witness [sig, preimage]
-      case B5.extract_preimage_offered wit of
-        Just pp ->
-          unPaymentPreimage pp @?= preimage
-        Nothing ->
-          assertFailure "expected preimage"
+    testCase "extract_preimage_htlc_success - Appendix C" $ do
+      items <- singleWitness =<< parseTx vecCHtlcSuccess1
+      fmap unPaymentPreimage
+        (B5.extract_preimage_htlc_success
+          (vecPaymentHash 0x01) (Witness items))
+        @?= Just (BS.replicate 32 0x01)
 
-  , testCase "extract_preimage_offered - wrong length" $ do
-      let sig = BS.replicate 72 0x30
-          badPreimage = BS.replicate 31 0xBB
-          wit = Witness [sig, badPreimage]
-      B5.extract_preimage_offered wit @?= Nothing
+  , testCase "extract_preimage_htlc_success - Appendix F" $ do
+      items <- singleWitness =<< parseTx vecFHtlcSuccess1
+      fmap unPaymentPreimage
+        (B5.extract_preimage_htlc_success
+          (vecPaymentHash 0x01) (Witness items))
+        @?= Just (BS.replicate 32 0x01)
 
-  , testCase "extract_preimage_offered - wrong count" $ do
-      let sig = BS.replicate 72 0x30
-          wit = Witness [sig]
-      B5.extract_preimage_offered wit @?= Nothing
+  , testCase "extract_preimage_htlc_success - wrong hash" $ do
+      items <- singleWitness =<< parseTx vecCHtlcSuccess1
+      B5.extract_preimage_htlc_success
+        (vecPaymentHash 0x05) (Witness items)
+        @?= Nothing
 
-  , testCase "extract_preimage_htlc_success - valid" $ do
-      let zero = BS.empty
-          remoteSig = BS.replicate 72 0x30
-          localSig = BS.replicate 72 0x30
-          preimage = dummyPreimage
-          wit = Witness [zero, remoteSig, localSig, preimage]
-      case B5.extract_preimage_htlc_success wit of
-        Just pp ->
-          unPaymentPreimage pp @?= preimage
-        Nothing ->
-          assertFailure "expected preimage"
+  , testCase "extract_preimage_htlc_success - timeout witness" $ do
+      items <- singleWitness =<< parseTx vecCHtlcTimeout5
+      B5.extract_preimage_htlc_success
+        (vecPaymentHash 0x05) (Witness items)
+        @?= Nothing
 
-  , testCase "extract_preimage_htlc_success - wrong count" $ do
-      let wit = Witness [BS.empty, dummyPreimage]
-      B5.extract_preimage_htlc_success wit @?= Nothing
+  , testCase "extract_preimage_htlc_success - no script" $ do
+      items <- singleWitness =<< parseTx vecCHtlcSuccess1
+      B5.extract_preimage_htlc_success
+        (vecPaymentHash 0x01) (Witness (take 4 items))
+        @?= Nothing
 
-  , testCase "extract_preimage_htlc_success - wrong length" $
-      do
-      let zero = BS.empty
-          remoteSig = BS.replicate 72 0x30
-          localSig = BS.replicate 72 0x30
-          badPreimage = BS.replicate 31 0xBB
-          wit = Witness
-            [zero, remoteSig, localSig, badPreimage]
-      B5.extract_preimage_htlc_success wit @?= Nothing
+  , testCase "extract_preimage_offered - remote claim" $ do
+      -- <remotehtlcsig> <payment_preimage> <witness_script>; the
+      -- signature is not checked.
+      (sig, script) <- offeredClaimParts
+      let preimage = BS.replicate 32 0x05
+      fmap unPaymentPreimage
+        (B5.extract_preimage_offered (vecPaymentHash 0x05)
+          (Witness [sig, preimage, script]))
+        @?= Just preimage
+
+  , testCase "extract_preimage_offered - wrong hash" $ do
+      (sig, script) <- offeredClaimParts
+      B5.extract_preimage_offered (vecPaymentHash 0x01)
+        (Witness [sig, BS.replicate 32 0x05, script])
+        @?= Nothing
+
+  , testCase "extract_preimage_offered - revocation spend" $ do
+      -- <revocation_sig> <revocationpubkey> <witness_script>
+      (sig, script) <- offeredClaimParts
+      B5.extract_preimage_offered (vecPaymentHash 0x05)
+        (Witness [sig, unPubkey (mkPubkey 0x01), script])
+        @?= Nothing
+
+  , testCase "extract_preimage_offered - no script" $ do
+      (sig, _) <- offeredClaimParts
+      B5.extract_preimage_offered (vecPaymentHash 0x05)
+        (Witness [sig, BS.replicate 32 0x05])
+        @?= Nothing
 
   , testCase "htlc_timed_out - at expiry" $ do
       let htlc = dummyHTLC
