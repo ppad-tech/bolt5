@@ -21,7 +21,6 @@ module Lightning.Protocol.BOLT5.Internal (
   , SpendingTx(..)
   , RevokedOutput(..)
   , RevokedOutputType(..)
-  , PenaltyContext(..)
   ) where
 
 import Lightning.Protocol.BOLT5.Types

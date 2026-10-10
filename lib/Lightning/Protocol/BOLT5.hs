@@ -60,10 +60,9 @@ module Lightning.Protocol.BOLT5 (
     -- ** Spending transactions
   , SpendingTx(..)
 
-    -- ** Penalty batching
+    -- ** Revoked outputs
   , RevokedOutput(..)
   , RevokedOutputType(..)
-  , PenaltyContext(..)
   , revoked_output_weight
 
     -- * Weight constants (Appendix A)
@@ -110,7 +109,6 @@ module Lightning.Protocol.BOLT5 (
   , spend_revoked_to_local
   , spend_revoked_htlc
   , spend_revoked_htlc_output
-  , spend_revoked_batch
 
     -- ** Anchor outputs
   , spend_anchor_owner

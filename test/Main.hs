@@ -973,77 +973,6 @@ spend_tests = testGroup "Spend" [
       B5.stx_input_script stx1 @?=
         B5.stx_input_script stx2
 
-  , testCase "spend_revoked_batch total value" $ do
-      let op1 = OutPoint dummyTxId 0
-          op2 = OutPoint dummyTxId 1
-          ro1 = B5.RevokedOutput op1 (Satoshi 50000)
-            B5.RevokedToLocal
-          ro2 = B5.RevokedOutput op2 (Satoshi 30000)
-            B5.RevokedToLocal
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro1 :| [ro2]
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      stx <- assertJust "spend_revoked_batch" $
-        B5.spend_revoked_batch pctx
-      let tx = B5.stx_tx stx
-          outVal = txout_value
-            (head' (tx_outputs tx))
-      -- Output should be less than total input
-      assertBool "output < total input"
-        (outVal < 80000)
-      -- Should have 2 inputs
-      length (tx_inputs tx) @?= 2
-
-  , testCase "spend_revoked_batch single element" $ do
-      let ro = B5.RevokedOutput
-            dummyOutPoint (Satoshi 50000)
-            B5.RevokedToLocal
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro :| []
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      stx <- assertJust "spend_revoked_batch" $
-        B5.spend_revoked_batch pctx
-      let tx = B5.stx_tx stx
-      length (tx_inputs tx) @?= 1
-      length (tx_outputs tx) @?= 1
-
-  , testCase "spend_revoked_batch mixed types" $ do
-      let op1 = OutPoint dummyTxId 0
-          op2 = OutPoint dummyTxId 1
-          op3 = OutPoint dummyTxId 2
-          ro1 = B5.RevokedOutput op1
-            (Satoshi 50000)
-            B5.RevokedToLocal
-          ro2 = B5.RevokedOutput op2
-            (Satoshi 10000)
-            (B5.RevokedHTLC
-              (B5.HTLCOfferedOutput
-                (CltvExpiry 500000)))
-          ro3 = B5.RevokedOutput op3
-            (Satoshi 10000)
-            (B5.RevokedHTLC
-              (B5.HTLCReceivedOutput
-                (CltvExpiry 500000)))
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro1 :| [ro2, ro3]
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      stx <- assertJust "spend_revoked_batch" $
-        B5.spend_revoked_batch pctx
-      let tx = B5.stx_tx stx
-      length (tx_inputs tx) @?= 3
-
   , testCase "spend_to_local fee underflow" $ do
       B5.spend_to_local
         dummyOutPoint (Satoshi 1)
@@ -1052,18 +981,6 @@ spend_tests = testGroup "Spend" [
         dummyDestScript dummyFeerate
       @?= Nothing
 
-  , testCase "spend_revoked_batch fee underflow" $ do
-      let ro = B5.RevokedOutput
-            dummyOutPoint (Satoshi 1)
-            B5.RevokedToLocal
-          pctx = B5.PenaltyContext
-            { B5.pc_outputs = ro :| []
-            , B5.pc_revocation_key =
-                dummyRevocationPubkey
-            , B5.pc_destination = dummyDestScript
-            , B5.pc_feerate = dummyFeerate
-            }
-      B5.spend_revoked_batch pctx @?= Nothing
   ]
 
 -- htlc spend tests ---------------------------------------------------
@@ -1457,31 +1374,6 @@ property_tests = testGroup "Properties" [
             B5.revoked_output_weight roReceived
             == B5.accepted_htlc_penalty_input_weight
 
-  , testProperty "spend_revoked_batch input count" $
-      \(Positive n') ->
-        let n = min (n' :: Int) 5
-            ros = [ B5.RevokedOutput
-                      (OutPoint dummyTxId
-                        (fromIntegral i))
-                      (Satoshi 1000000)
-                      B5.RevokedToLocal
-                  | i <- [0..n-1] ]
-        in case ros of
-          [] -> True  -- impossible with Positive
-          (r:rs) ->
-            let pctx = B5.PenaltyContext
-                  { B5.pc_outputs = r :| rs
-                  , B5.pc_revocation_key =
-                      dummyRevocationPubkey
-                  , B5.pc_destination =
-                      dummyDestScript
-                  , B5.pc_feerate = FeeratePerKw 253
-                  }
-            in case B5.spend_revoked_batch pctx of
-              Nothing -> False
-              Just stx ->
-                length (tx_inputs (B5.stx_tx stx))
-                == n
   ]
 
 -- helpers ------------------------------------------------------------

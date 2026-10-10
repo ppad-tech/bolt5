@@ -26,10 +26,9 @@ module Lightning.Protocol.BOLT5.Types (
     -- * Spending transactions
   , SpendingTx(..)
 
-    -- * Penalty batching
+    -- * Revoked outputs
   , RevokedOutput(..)
   , RevokedOutputType(..)
-  , PenaltyContext(..)
   , revoked_output_weight
 
     -- * Weight constants (Appendix A)
@@ -49,7 +48,6 @@ module Lightning.Protocol.BOLT5.Types (
 
 import Bitcoin.Prim.Tx (Tx(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
-import Data.List.NonEmpty (NonEmpty)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT3.Types
@@ -165,7 +163,7 @@ data SpendingTx = SpendingTx
     -- ^ Sighash type for the local signature.
   } deriving (Eq, Show, Generic)
 
--- penalty batching ---------------------------------------------------
+-- revoked outputs ----------------------------------------------------
 
 -- | A revoked output that can be swept with a revocation key.
 --
@@ -195,18 +193,6 @@ revoked_output_weight !ro = case ro_type ro of
   RevokedHTLC !htype ->
     htlcOutputTypeWeight htype
 {-# INLINE revoked_output_weight #-}
-
--- | Context for constructing batched penalty transactions.
-data PenaltyContext = PenaltyContext
-  { pc_outputs        :: !(NonEmpty RevokedOutput)
-    -- ^ Revoked outputs to sweep (must be non-empty).
-  , pc_revocation_key :: !RevocationPubkey
-    -- ^ Revocation pubkey for all outputs.
-  , pc_destination    :: !Script
-    -- ^ Destination scriptPubKey.
-  , pc_feerate        :: !FeeratePerKw
-    -- ^ Fee rate for the penalty transaction.
-  } deriving (Eq, Show, Generic)
 
 -- weight constants (BOLT #5 Appendix A) ------------------------------
 

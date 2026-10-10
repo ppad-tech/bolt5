@@ -30,7 +30,6 @@ module Lightning.Protocol.BOLT5.Spend (
   , spend_revoked_to_local
   , spend_revoked_htlc
   , spend_revoked_htlc_output
-  , spend_revoked_batch
 
     -- * Anchor spends
   , spend_anchor_owner
@@ -40,7 +39,6 @@ module Lightning.Protocol.BOLT5.Spend (
 import Bitcoin.Prim.Tx (TxOut(..))
 import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import Data.List.NonEmpty (NonEmpty(..))
-import qualified Data.List.NonEmpty as NE
 import Data.Word (Word32)
 import qualified Data.ByteString as BS
 import Lightning.Protocol.BOLT3 hiding
@@ -408,70 +406,6 @@ spend_revoked_htlc_output !op !value !revpk !delay
                    outputValue 0
        in Just (SpendingTx tx witnessScript value
                   SIGHASH_ALL)
-
--- | Construct a batched penalty transaction spending multiple
---   revoked outputs.
---
--- Per BOLT #5, up to 483 bidirectional HTLCs plus to_local can
--- be resolved in a single penalty transaction (within the
--- 400,000 weight limit). The caller signs each input with the
--- revocation privkey.
---
--- Returns 'Nothing' if the total fee would exceed the total
--- input value.
-spend_revoked_batch :: PenaltyContext -> Maybe SpendingTx
-spend_revoked_batch !ctx =
-  let !outs = pc_outputs ctx
-      !destScript = pc_destination ctx
-      !feerate = pc_feerate ctx
-
-      -- Calculate total input value and weight
-      !(totalValue, totalWeight) =
-        go (Satoshi 0) penalty_tx_base_weight
-          (NE.toList outs)
-
-      !fee = spending_fee feerate totalWeight
-  in if unSatoshi fee >= unSatoshi totalValue
-     then Nothing
-     else
-       let !outputValue =
-             Satoshi
-               (unSatoshi totalValue - unSatoshi fee)
-
-           -- Build inputs
-           !txInputs = fmap mkPenaltyInput outs
-
-           -- Single output
-           !txOutput = TxOut
-             (unSatoshi outputValue)
-             (unScript destScript)
-
-           !tx = Tx
-             { tx_version   = 2
-             , tx_inputs    = txInputs
-             , tx_outputs   = txOutput :| []
-             , tx_witnesses = []
-             , tx_locktime  = 0
-             }
-
-           !witnessScript = Script BS.empty
-       in Just (SpendingTx tx witnessScript totalValue
-                  SIGHASH_ALL)
-  where
-    go !totalVal !totalWt [] = (totalVal, totalWt)
-    go !totalVal !totalWt (ro:rest) =
-      let !w = revoked_output_weight ro
-          !v = Satoshi
-            (unSatoshi totalVal
-             + unSatoshi (ro_value ro))
-      in go v (totalWt + w) rest
-
-    mkPenaltyInput !ro =
-      TxIn
-        { txin_prevout = ro_outpoint ro
-        , txin_script_sig = BS.empty
-        , txin_sequence = 0xFFFFFFFF
-        }
 
 -- anchor spends ------------------------------------------------------
 

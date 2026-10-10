@@ -8,7 +8,6 @@ import Bitcoin.Prim.Tx.Sighash (SighashType(..))
 import Control.DeepSeq (NFData(..))
 import Criterion.Main
 import qualified Data.ByteString as BS
-import qualified Data.List.NonEmpty as NE
 import Lightning.Protocol.BOLT3 hiding
   (txout_value, txout_script)
 import qualified Lightning.Protocol.BOLT5 as B5
@@ -74,10 +73,6 @@ instance NFData B5.SpendingTx where
   rnf (B5.SpendingTx tx scr val sh) =
     rnf tx `seq` rnf scr `seq` rnf val `seq` rnf sh
 
-instance NFData B5.PenaltyContext where
-  rnf (B5.PenaltyContext os rk d f) =
-    rnf os `seq` rnf rk `seq` rnf d `seq` rnf f
-
 main :: IO ()
 main = defaultMain [
     spend_benchmarks
@@ -118,14 +113,6 @@ dummyFeerate = FeeratePerKw 253
 dummyDelay :: ToSelfDelay
 dummyDelay = ToSelfDelay 144
 
-mkRevokedOutputs :: Int -> NE.NonEmpty B5.RevokedOutput
-mkRevokedOutputs n =
-  let ro i = B5.RevokedOutput
-        (OutPoint dummyTxId (fromIntegral i))
-        (Satoshi 10000)
-        B5.RevokedToLocal
-  in  ro 0 NE.:| [ ro i | i <- [1..n-1] ]
-
 -- benchmarks ---------------------------------------------------------
 
 spend_benchmarks :: Benchmark
@@ -147,23 +134,6 @@ spend_benchmarks = bgroup "spend" [
             dummyOutPoint v dummyFundPk dummyDest)
         (Satoshi 330)
 
-  , bench "spend_revoked_batch/10" $
-      nf B5.spend_revoked_batch
-        (B5.PenaltyContext
-          (mkRevokedOutputs 10)
-          dummyRevPk dummyDest dummyFeerate)
-
-  , bench "spend_revoked_batch/100" $
-      nf B5.spend_revoked_batch
-        (B5.PenaltyContext
-          (mkRevokedOutputs 100)
-          dummyRevPk dummyDest dummyFeerate)
-
-  , bench "spend_revoked_batch/483" $
-      nf B5.spend_revoked_batch
-        (B5.PenaltyContext
-          (mkRevokedOutputs 483)
-          dummyRevPk dummyDest dummyFeerate)
   ]
 
 classify_benchmarks :: Benchmark
